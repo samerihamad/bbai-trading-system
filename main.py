@@ -17,7 +17,6 @@ if not API_KEY or not SECRET_KEY:
     print("❌ API keys not found!", flush=True)
     exit()
 
-# قائمة الأسهم
 SYMBOLS = ["BBAI", "AAPL", "TSLA"]
 
 try:
@@ -43,7 +42,7 @@ def fetch_data(symbol):
             timeframe=TimeFrame(15, TimeFrameUnit.Minute),
             start=start,
             end=end,
-            feed=DataFeed.IEX  # استخدام البيانات المجانية
+            feed=DataFeed.IEX
         )
 
         bars = data_client.get_stock_bars(request)
