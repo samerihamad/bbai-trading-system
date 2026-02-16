@@ -9,13 +9,13 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 
-print("🚀 Multi-Stock Trend + RS + Breakout System Starting...", flush=True)
+print("🚀 Trend + RS + Breakout System Starting...", flush=True)
 
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 if not API_KEY or not SECRET_KEY:
-    print("❌ API keys not found!", flush=True)
+    print("❌ API keys not found")
     exit()
 
 SYMBOLS = ["BBAI", "AAPL", "TSLA"]
@@ -59,46 +59,38 @@ def analyze_symbol(symbol, benchmark_df):
         print(f"{symbol} → Not enough data", flush=True)
         return
 
-    # حساب المتوسطات
     df["EMA200"] = calculate_ema(df["close"], 200)
     df["EMA50"] = calculate_ema(df["close"], 50)
 
     latest = df.iloc[-1]
 
-    # تحديد الترند
+    # Trend
     if latest["close"] > latest["EMA200"] and latest["EMA50"] > latest["EMA200"]:
         trend = "UP"
     else:
         trend = "DOWN"
 
-    # حساب القوة النسبية
+    # Relative Strength
     if len(df) < 120 or len(benchmark_df) < 120:
         rs_status = "N/A"
     else:
-        stock_return = (
-            df["close"].iloc[-1] - df["close"].iloc[-100]
-        ) / df["close"].iloc[-100]
-
-        bench_return = (
-            benchmark_df["close"].iloc[-1] - benchmark_df["close"].iloc[-100]
-        ) / benchmark_df["close"].iloc[-100]
-
+        stock_return = (df["close"].iloc[-1] - df["close"].iloc[-100]) / df["close"].iloc[-100]
+        bench_return = (benchmark_df["close"].iloc[-1] - benchmark_df["close"].iloc[-100]) / benchmark_df["close"].iloc[-100]
         rs_status = "STRONG" if stock_return > bench_return else "WEAK"
 
-    status_message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
+    message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
 
-    # منطق الكسر (فقط إذا البيئة مناسبة)
+    # Breakout logic
     if trend == "UP" and rs_status == "STRONG":
-
         recent_high = df["high"].iloc[-51:-1].max()
         current_close = df["close"].iloc[-1]
 
         if current_close > recent_high:
-            status_message += " | 🚀 BREAKOUT DETECTED"
+            message += " | 🚀 BREAKOUT DETECTED"
         else:
-            status_message += " | No Breakout"
+            message += " | No Breakout"
 
-    print(status_message, flush=True)
+    print(message, flush=True)
 
 
 while True:
@@ -108,7 +100,7 @@ while True:
     benchmark_df = fetch_bars(BENCHMARK)
 
     if benchmark_df is None:
-        print("❌ Failed to fetch benchmark data", flush=True)
+        print("Failed to fetch benchmark data", flush=True)
         time.sleep(900)
         continue
 
