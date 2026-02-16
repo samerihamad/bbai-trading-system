@@ -75,7 +75,21 @@ def analyze_symbol(symbol, benchmark_df):
 
         rs_status = "STRONG" if stock_return > bench_return else "WEAK"
 
-    print(f"{symbol} → Trend: {trend} | RS: {rs_status}", flush=True)
+    status_message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
+
+# لا نبحث عن كسر إلا إذا الشروط محققة
+if trend == "UP" and rs_status == "STRONG":
+
+    recent_high = df["high"].iloc[-51:-1].max()
+    current_close = df["close"].iloc[-1]
+
+    if current_close > recent_high:
+        status_message += " | 🚀 BREAKOUT DETECTED"
+    else:
+        status_message += " | No Breakout"
+
+print(status_message, flush=True)
+
 
 while True:
 
