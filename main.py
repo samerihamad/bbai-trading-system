@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 print("🚀 Multi-Stock Trading System Starting...", flush=True)
 
@@ -31,12 +31,13 @@ except Exception as e:
     exit()
 
 def fetch_data(symbol):
-    end = datetime.utcnow()
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=10)
 
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame.Minute(15),
+        timeframe=TimeFrame(15, TimeFrameUnit.Minute),
         start=start,
         end=end
     )
