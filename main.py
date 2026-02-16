@@ -95,7 +95,14 @@ def analyze_symbol(symbol, benchmark_df):
 
 while True:
 
-    print("\n🔄 Running Analysis...\n", flush=True)
+    clock = trading_client.get_clock()
+
+    if not clock.is_open:
+        print("🛑 Market is CLOSED. Waiting 15 minutes...\n", flush=True)
+        time.sleep(900)
+        continue
+
+    print("\n🔄 Market OPEN — Running Analysis...\n", flush=True)
 
     benchmark_df = fetch_bars(BENCHMARK)
 
