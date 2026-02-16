@@ -2,3 +2,5 @@ alpaca-py
 pandas
 numpy
 requests
+pytz
+
