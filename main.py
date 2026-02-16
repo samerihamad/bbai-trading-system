@@ -42,7 +42,7 @@ def fetch_data(symbol):
         end=end
     )
 
-    bars = data_client.get_stock_bars(request)
+    bars = data_client.get_stock_bars(request, feed="iex")
     df = bars.df
 
     if not df.empty:
