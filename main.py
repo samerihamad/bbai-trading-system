@@ -127,6 +127,9 @@ while True:
     clock = trading_client.get_clock()
 
     # ===== MARKET CLOSED =====
+minutes_to_open = (next_open - now_utc).total_seconds() / 60
+print("Minutes to open:", minutes_to_open, flush=True)
+
     if not clock.is_open:
 
         now_utc = datetime.now(timezone.utc)
