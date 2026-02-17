@@ -119,23 +119,21 @@ def send_telegram(message):
         print("Telegram error:", e, flush=True)
 
 last_premarket_alert_date = None
-
 last_premarket_alert_date = None
 
 while True:
 
     clock = trading_client.get_clock()
+    now_utc = datetime.now(timezone.utc)
 
     # ===== MARKET CLOSED =====
-minutes_to_open = (next_open - now_utc).total_seconds() / 60
-print("Minutes to open:", minutes_to_open, flush=True)
-
     if not clock.is_open:
 
-        now_utc = datetime.now(timezone.utc)
-        next_open = clock.next_open.replace(tzinfo=timezone.utc)
-
+        next_open = clock.next_open  # لا تستخدم replace
         minutes_to_open = (next_open - now_utc).total_seconds() / 60
+
+        print("Minutes to open:", minutes_to_open, flush=True)
+
         today_date = now_utc.date()
 
         if 0 < minutes_to_open <= 30 and last_premarket_alert_date != today_date:
@@ -177,3 +175,4 @@ print("Minutes to open:", minutes_to_open, flush=True)
 
     print("\n⏳ Waiting 15 minutes...\n", flush=True)
     time.sleep(900)
+
