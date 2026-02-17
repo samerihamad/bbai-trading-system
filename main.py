@@ -71,6 +71,7 @@ def calculate_ema(series, period):
 # ==============================
 
 def check_breakout_and_open_trade(symbol, df):
+    manage_open_trade(symbol, df)
     global current_trade, daily_loss_count
 
     if current_trade is not None:
@@ -118,7 +119,68 @@ def check_breakout_and_open_trade(symbol, df):
 # ==============================
 # ANALYSIS
 # ==============================
+def manage_open_trade(symbol, df):
+    global current_trade, daily_loss_count
 
+    if current_trade is None:
+        return
+
+    if current_trade["symbol"] != symbol:
+        return
+
+    high_price = df["high"].iloc[-1]
+    low_price = df["low"].iloc[-1]
+
+    entry = current_trade["entry"]
+    stop = current_trade["stop"]
+    target = current_trade["target"]
+    risk = current_trade["risk"]
+
+    # ===== Check 1R move =====
+    if not current_trade["moved_to_half_r"]:
+        if high_price >= entry + risk:
+            new_stop = entry + (0.5 * risk)
+            current_trade["stop"] = new_stop
+            current_trade["moved_to_half_r"] = True
+
+            message = (
+                f"🔄 STOP MOVED TO +0.5R\n\n"
+                f"Symbol: {symbol}\n"
+                f"New Stop: {round(new_stop,2)}"
+            )
+
+            print(message, flush=True)
+            send_telegram(message)
+
+    # ===== Check Target (2R) =====
+    if high_price >= target:
+        message = (
+            f"🎯 TARGET HIT (2R)\n\n"
+            f"Symbol: {symbol}\n"
+            f"Exit: {round(target,2)}"
+        )
+
+        print(message, flush=True)
+        send_telegram(message)
+
+        current_trade = None
+        return
+
+    # ===== Check Stop =====
+    if low_price <= current_trade["stop"]:
+        message = (
+            f"❌ STOP HIT\n\n"
+            f"Symbol: {symbol}\n"
+            f"Exit: {round(current_trade['stop'],2)}"
+        )
+
+        print(message, flush=True)
+        send_telegram(message)
+
+        daily_loss_count += 1
+        current_trade = None
+        return
+        
 def analyze_symbol(symbol, benchmark_df):
     df = fetch_bars(symbol)
 
@@ -147,8 +209,10 @@ def analyze_symbol(symbol, benchmark_df):
 
     message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
     print(message, flush=True)
-
+    
     check_breakout_and_open_trade(symbol, df)
+    manage_open_trade(symbol, df)
+
 
 
 # ==============================
