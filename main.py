@@ -1,6 +1,8 @@
 import os
 import time
 import pandas as pd
+import requests
+
 from datetime import datetime, timedelta, timezone
 
 from alpaca.trading.client import TradingClient
@@ -13,6 +15,10 @@ print("🚀 Trend + RS + Breakout System Starting...", flush=True)
 
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 
 if not API_KEY or not SECRET_KEY:
     print("❌ API keys not found")
@@ -93,7 +99,29 @@ def analyze_symbol(symbol, benchmark_df):
     print(message, flush=True)
 
 
+
+def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Telegram not configured", flush=True)
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message
+    }
+
+    try:
+        requests.post(url, data=payload)
+        print("Telegram message sent", flush=True)
+    except Exception as e:
+        print("Telegram error:", e, flush=True)
+
+
+
 while True:
+
+    send_telegram("🔥 Telegram test from trading system")
 
     clock = trading_client.get_clock()
 
