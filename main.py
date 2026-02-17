@@ -112,10 +112,11 @@ def send_telegram(message):
     }
 
     try:
-        requests.post(url, data=payload)
-        print("Telegram message sent", flush=True)
+        response = requests.post(url, data=payload)
+        print("Telegram response:", response.text, flush=True)
     except Exception as e:
         print("Telegram error:", e, flush=True)
+
 
 
 
