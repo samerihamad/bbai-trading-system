@@ -81,7 +81,7 @@ def check_breakout_and_open_trade(symbol, df):
 
     recent_high = df["high"].iloc[-51:-1].max()
 
-    # شمعتين تأكيد
+    # شرط شمعتين تأكيد
     if df["close"].iloc[-2] > recent_high and df["close"].iloc[-1] > recent_high:
 
         entry = df["close"].iloc[-1]
@@ -103,17 +103,16 @@ def check_breakout_and_open_trade(symbol, df):
         }
 
         message = (
-    f"📈 PAPER TRADE OPENED\n\n"
-    f"Symbol: {symbol}\n"
-    f"Entry: {round(entry, 2)}\n"
-    f"Stop: {round(stop, 2)}\n"
-    f"Target (2R): {round(target, 2)}\n"
-    f"Risk (1R): {round(risk, 2)}"
-)
+            f"📈 PAPER TRADE OPENED\n\n"
+            f"Symbol: {symbol}\n"
+            f"Entry: {round(entry, 2)}\n"
+            f"Stop: {round(stop, 2)}\n"
+            f"Target (2R): {round(target, 2)}\n"
+            f"Risk (1R): {round(risk, 2)}"
+        )
 
-print(message, flush=True)
-send_telegram(message)
-
+        print(message, flush=True)
+        send_telegram(message)
 
 
 # ==============================
@@ -138,7 +137,7 @@ def analyze_symbol(symbol, benchmark_df):
     else:
         trend = "DOWN"
 
-    # RS
+    # Relative Strength
     if len(df) < 120 or len(benchmark_df) < 120:
         rs_status = "N/A"
     else:
@@ -147,10 +146,8 @@ def analyze_symbol(symbol, benchmark_df):
         rs_status = "STRONG" if stock_return > bench_return else "WEAK"
 
     message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
-
     print(message, flush=True)
 
-    # فتح صفقة إذا تحقق الشرط
     check_breakout_and_open_trade(symbol, df)
 
 
