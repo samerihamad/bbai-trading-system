@@ -122,8 +122,6 @@ def send_telegram(message):
 
 while True:
 
-    send_telegram("🔥 Telegram test from trading system")
-
     clock = trading_client.get_clock()
 
     if not clock.is_open:
