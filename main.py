@@ -20,7 +20,6 @@ SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-
 if not API_KEY or not SECRET_KEY:
     print("❌ API keys not found")
     exit()
@@ -31,6 +30,15 @@ BENCHMARK = "QQQ"
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
+# ===== GLOBAL STATE =====
+current_trade = None
+daily_loss_count = 0
+last_premarket_alert_date = None
+
+
+# ==============================
+# DATA FUNCTIONS
+# ==============================
 
 def fetch_bars(symbol):
     end = datetime.now(timezone.utc)
@@ -58,8 +66,50 @@ def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 
-def analyze_symbol(symbol, benchmark_df):
+# ==============================
+# TRADE ENGINE
+# ==============================
 
+def check_breakout_and_open_trade(symbol, df):
+    global current_trade, daily_loss_count
+
+    if current_trade is not None:
+        return
+
+    if daily_loss_count >= 2:
+        return
+
+    recent_high = df["high"].iloc[-51:-1].max()
+
+    # شمعتين تأكيد
+    if df["close"].iloc[-2] > recent_high and df["close"].iloc[-1] > recent_high:
+
+        entry = df["close"].iloc[-1]
+        stop = df["low"].iloc[-6:-1].min()
+
+        risk = entry - stop
+        if risk <= 0:
+            return
+
+        target = entry + (2 * risk)
+
+        current_trade = {
+            "symbol": symbol,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "risk": risk,
+            "moved_to_half_r": False
+        }
+
+        print(f"📈 Paper Trade Opened on {symbol} | Entry: {entry} | Stop: {stop} | Target: {target}", flush=True)
+
+
+# ==============================
+# ANALYSIS
+# ==============================
+
+def analyze_symbol(symbol, benchmark_df):
     df = fetch_bars(symbol)
 
     if df is None or len(df) < 250:
@@ -77,7 +127,7 @@ def analyze_symbol(symbol, benchmark_df):
     else:
         trend = "DOWN"
 
-    # Relative Strength
+    # RS
     if len(df) < 120 or len(benchmark_df) < 120:
         rs_status = "N/A"
     else:
@@ -87,39 +137,32 @@ def analyze_symbol(symbol, benchmark_df):
 
     message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
 
-    # Breakout logic
-    if trend == "UP" and rs_status == "STRONG":
-        recent_high = df["high"].iloc[-51:-1].max()
-        current_close = df["close"].iloc[-1]
-
-        if current_close > recent_high:
-            message += " | 🚀 BREAKOUT DETECTED"
-        else:
-            message += " | No Breakout"
-
     print(message, flush=True)
 
+    # فتح صفقة إذا تحقق الشرط
+    check_breakout_and_open_trade(symbol, df)
 
+
+# ==============================
+# TELEGRAM
+# ==============================
 
 def send_telegram(message):
     if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram not configured", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    payload = {"chat_id": CHAT_ID, "text": message}
 
     try:
-        response = requests.post(url, data=payload)
-        print("Telegram response:", response.text, flush=True)
-    except Exception as e:
-        print("Telegram error:", e, flush=True)
+        requests.post(url, data=payload)
+    except:
+        pass
 
-last_premarket_alert_date = None
-last_premarket_alert_date = None
+
+# ==============================
+# MAIN LOOP
+# ==============================
 
 while True:
 
@@ -129,7 +172,7 @@ while True:
     # ===== MARKET CLOSED =====
     if not clock.is_open:
 
-        next_open = clock.next_open  # لا تستخدم replace
+        next_open = clock.next_open
         minutes_to_open = (next_open - now_utc).total_seconds() / 60
         today_date = now_utc.date()
 
@@ -156,14 +199,12 @@ while True:
         time.sleep(60)
         continue
 
-
     # ===== MARKET OPEN =====
     print("\n🔄 Market OPEN — Running Analysis\n", flush=True)
 
     benchmark_df = fetch_bars(BENCHMARK)
 
     if benchmark_df is None:
-        print("Failed to fetch benchmark data", flush=True)
         time.sleep(900)
         continue
 
@@ -172,4 +213,3 @@ while True:
 
     print("\n⏳ Waiting 15 minutes...\n", flush=True)
     time.sleep(900)
-
