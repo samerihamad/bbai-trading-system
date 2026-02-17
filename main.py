@@ -120,11 +120,13 @@ def send_telegram(message):
 
 last_premarket_alert_date = None
 
+last_premarket_alert_date = None
+
 while True:
 
     clock = trading_client.get_clock()
 
-    # ====== MARKET CLOSED ======
+    # ===== MARKET CLOSED =====
     if not clock.is_open:
 
         now_utc = datetime.now(timezone.utc)
@@ -135,8 +137,11 @@ while True:
 
         if 0 < minutes_to_open <= 30 and last_premarket_alert_date != today_date:
 
-            ny_time = next_open.astimezone(pytz.timezone("America/New_York"))
-            dubai_time = next_open.astimezone(pytz.timezone("Asia/Dubai"))
+            ny_tz = pytz.timezone("America/New_York")
+            dubai_tz = pytz.timezone("Asia/Dubai")
+
+            ny_time = next_open.astimezone(ny_tz)
+            dubai_time = next_open.astimezone(dubai_tz)
 
             message = (
                 "🚨 NASDAQ opens in 30 minutes!\n\n"
@@ -153,8 +158,9 @@ while True:
         time.sleep(60)
         continue
 
-    # ====== MARKET OPEN ======
-    print("\n🔄 Market OPEN — Running Analysis...\n", flush=True)
+
+    # ===== MARKET OPEN =====
+    print("\n🔄 Market OPEN — Running Analysis\n", flush=True)
 
     benchmark_df = fetch_bars(BENCHMARK)
 
