@@ -24,7 +24,7 @@ if not API_KEY or not SECRET_KEY:
     print("❌ API keys not found")
     exit()
 
-SYMBOLS = ["BBAI", "AAPL", "TSLA"]
+SYMBOLS = ["BBAI", "ONDS", "NVTS"]
 BENCHMARK = "QQQ"
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
