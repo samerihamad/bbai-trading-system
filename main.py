@@ -102,7 +102,18 @@ def check_breakout_and_open_trade(symbol, df):
             "moved_to_half_r": False
         }
 
-        print(f"📈 Paper Trade Opened on {symbol} | Entry: {entry} | Stop: {stop} | Target: {target}", flush=True)
+        message = (
+    f"📈 PAPER TRADE OPENED\n\n"
+    f"Symbol: {symbol}\n"
+    f"Entry: {round(entry, 2)}\n"
+    f"Stop: {round(stop, 2)}\n"
+    f"Target (2R): {round(target, 2)}\n"
+    f"Risk (1R): {round(risk, 2)}"
+)
+
+print(message, flush=True)
+send_telegram(message)
+
 
 
 # ==============================
