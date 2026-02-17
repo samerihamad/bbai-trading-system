@@ -117,17 +117,40 @@ def send_telegram(message):
     except Exception as e:
         print("Telegram error:", e, flush=True)
 
-
-
+last_premarket_alert_date = None
 
 while True:
 
     clock = trading_client.get_clock()
 
-    if not clock.is_open:
-        print("🛑 Market is CLOSED. Waiting 15 minutes...\n", flush=True)
-        time.sleep(900)
-        continue
+if not clock.is_open:
+
+    now_utc = datetime.now(timezone.utc)
+    next_open = clock.next_open.replace(tzinfo=timezone.utc)
+
+    minutes_to_open = (next_open - now_utc).total_seconds() / 60
+    today_date = now_utc.date()
+
+    if 0 < minutes_to_open <= 30 and last_premarket_alert_date != today_date:
+
+        ny_time = next_open.astimezone(pytz.timezone("America/New_York"))
+        dubai_time = next_open.astimezone(pytz.timezone("Asia/Dubai"))
+
+        message = (
+            "🚨 NASDAQ opens in 30 minutes!\n\n"
+            f"🇺🇸 NY Time: {ny_time.strftime('%H:%M')}\n"
+            f"🇦🇪 UAE Time: {dubai_time.strftime('%H:%M')}\n\n"
+            "جهّز نفسك يا بطل 💪"
+        )
+
+        send_telegram(message)
+        last_premarket_alert_date = today_date
+        print("Pre-market alert sent", flush=True)
+
+    print("🛑 Market is CLOSED", flush=True)
+    time.sleep(60)
+    continue
+
 
     print("\n🔄 Market OPEN — Running Analysis...\n", flush=True)
 
