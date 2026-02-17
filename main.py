@@ -131,9 +131,6 @@ while True:
 
         next_open = clock.next_open  # لا تستخدم replace
         minutes_to_open = (next_open - now_utc).total_seconds() / 60
-
-        print("Minutes to open:", minutes_to_open, flush=True)
-
         today_date = now_utc.date()
 
         if 0 < minutes_to_open <= 30 and last_premarket_alert_date != today_date:
