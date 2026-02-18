@@ -1,17 +1,20 @@
-import os import time import pandas as pd import requests import pytz
+import os
+import time
+import pandas as pd
+import requests
+import pytz
 import csv
 
-from datetime import datetime, timedelta, timezone from
-alpaca.trading.client import TradingClient from alpaca.data.historical
-import StockHistoricalDataClient from alpaca.data.requests import
-StockBarsRequest from alpaca.data.timeframe import TimeFrame,
-TimeFrameUnit from alpaca.data.enums import DataFeed
+from datetime import datetime, timedelta, timezone
+from alpaca.trading.client import TradingClient
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import DataFeed
 
-==============================
-
-CONFIG
-
-==============================
+# ==============================
+# CONFIG
+# ==============================
 
 SYMBOLS = ["BBAI", "ONDS", "NVTS"]
 BENCHMARK = "QQQ"
@@ -19,68 +22,84 @@ BENCHMARK = "QQQ"
 RISK_PERCENT = 0.03
 LOG_FILE = "trades_log.csv"
 
+# ==============================
+# ENV
+# ==============================
 
-==============================
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ENV
-
-==============================
-
-API_KEY = os.getenv("ALPACA_API_KEY") SECRET_KEY =
-os.getenv("ALPACA_SECRET_KEY") BOT_TOKEN =
-os.getenv("TELEGRAM_BOT_TOKEN") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-if not API_KEY or not SECRET_KEY: print("Missing API keys") exit()
+if not API_KEY or not SECRET_KEY:
+    print("Missing API keys")
+    exit()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-account = trading_client.get_account() current_equity =
-float(account.equity)
+account = trading_client.get_account()
+current_equity = float(account.equity)
 
-==============================
+# ==============================
+# GLOBAL STATE
+# ==============================
 
-GLOBAL STATE
+current_trade = None
+daily_loss_count = 0
+last_premarket_alert_date = None
+last_report_sent_date = None
+last_no_setup_hour = None
 
-==============================
+# ==============================
+# CSV INIT
+# ==============================
 
-current_trade = None daily_loss_count = 0 last_premarket_alert_date =
-None last_report_sent_date = None last_no_setup_hour = None
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "date_open",
+            "symbol",
+            "entry",
+            "stop",
+            "target",
+            "exit",
+            "result",
+            "r_multiple"
+        ])
 
-==============================
+# ==============================
+# UTIL
+# ==============================
 
-CSV INIT
+def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": message})
 
-==============================
+def log_trade(data):
+    with open(LOG_FILE, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            data["date_open"],
+            data["symbol"],
+            data["entry"],
+            data["stop"],
+            data["target"],
+            data["exit"],
+            data["result"],
+            data["r_multiple"]
+        ])
 
-if not os.path.exists(LOG_FILE): with open(LOG_FILE, mode="w",
-newline="") as file: writer = csv.writer(file) writer.writerow([
-"date_open", "symbol", "entry", "stop", "target", "exit", "result",
-"r_multiple" ])
+# ==============================
+# DATA
+# ==============================
 
-==============================
-
-UTIL
-
-==============================
-
-def send_telegram(message): if not BOT_TOKEN or not CHAT_ID: return url
-= f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-requests.post(url, data={"chat_id": CHAT_ID, "text": message})
-
-def log_trade(data): with open(LOG_FILE, mode="a", newline="") as file:
-writer = csv.writer(file) writer.writerow([ data["date_open"],
-data["symbol"], data["entry"], data["stop"], data["target"],
-data["exit"], data["result"], data["r_multiple"] ])
-
-==============================
-
-DATA
-
-==============================
-
-def fetch_bars(symbol): end = datetime.now(timezone.utc) start = end -
-timedelta(days=40)
+def fetch_bars(symbol):
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=40)
 
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
@@ -97,17 +116,15 @@ timedelta(days=40)
 
     return df.reset_index()
 
-def calculate_ema(series, period): return series.ewm(span=period,
-adjust=False).mean()
+def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
-==============================
+# ==============================
+# TRADE ENGINE
+# ==============================
 
-TRADE ENGINE
-
-==============================
-
-def manage_open_trade(symbol, df): global current_trade,
-daily_loss_count, current_equity
+def manage_open_trade(symbol, df):
+    global current_trade, daily_loss_count, current_equity
 
     if current_trade is None:
         return
@@ -122,6 +139,7 @@ daily_loss_count, current_equity
     target = current_trade["target"]
     risk = current_trade["risk"]
 
+    # Move to +0.5R
     if not current_trade["moved"]:
         if high_price >= entry + risk:
             new_stop = entry + (0.5 * risk)
@@ -133,6 +151,7 @@ daily_loss_count, current_equity
                 f"{symbol}\nNew Stop: {round(new_stop,2)}"
             )
 
+    # Target Hit
     if high_price >= target:
         r_multiple = 2
         risk_amount = current_equity * RISK_PERCENT
@@ -154,6 +173,7 @@ daily_loss_count, current_equity
         current_trade = None
         return
 
+    # Stop Hit
     if low_price <= current_trade["stop"]:
         r_multiple = -1
         risk_amount = current_equity * RISK_PERCENT
@@ -183,7 +203,8 @@ daily_loss_count, current_equity
         current_trade = None
         return
 
-def check_breakout(symbol, df): global current_trade, daily_loss_count
+def check_breakout(symbol, df):
+    global current_trade, daily_loss_count
 
     if current_trade is not None:
         return
@@ -219,13 +240,12 @@ def check_breakout(symbol, df): global current_trade, daily_loss_count
             f"Stop: {round(stop,2)}\nTarget: {round(target,2)}"
         )
 
-==============================
+# ==============================
+# DAILY REPORT
+# ==============================
 
-DAILY REPORT
-
-==============================
-
-def send_daily_report(): global last_report_sent_date
+def send_daily_report():
+    global last_report_sent_date
 
     ny = pytz.timezone("America/New_York")
     today_ny = datetime.now(ny).date()
@@ -264,17 +284,16 @@ def send_daily_report(): global last_report_sent_date
     send_telegram(message)
     last_report_sent_date = today_ny
 
-==============================
-
-MAIN LOOP
-
-==============================
+# ==============================
+# MAIN LOOP
+# ==============================
 
 while True:
 
     clock = trading_client.get_clock()
     now = datetime.now(pytz.timezone("America/New_York"))
 
+    # MARKET CLOSED
     if not clock.is_open:
 
         next_open = clock.next_open
@@ -292,6 +311,7 @@ while True:
         time.sleep(60)
         continue
 
+    # MARKET OPEN
     benchmark_df = fetch_bars(BENCHMARK)
     setup_found = False
 
@@ -306,6 +326,7 @@ while True:
         if current_trade is not None:
             setup_found = True
 
+    # Hourly No Setup
     if current_trade is None:
         hour_now = now.hour
         if last_no_setup_hour != hour_now:
