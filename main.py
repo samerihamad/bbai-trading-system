@@ -30,6 +30,11 @@ BENCHMARK = "QQQ"
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
+# ✅ تأكيد الحساب المتصل
+account = trading_client.get_account()
+print("Connected Equity:", account.equity, flush=True)
+
+
 # ===== GLOBAL STATE =====
 current_trade = None
 daily_loss_count = 0
