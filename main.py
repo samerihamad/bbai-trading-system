@@ -3,6 +3,7 @@ import time
 import pandas as pd
 import requests
 import pytz
+import csv
 
 from datetime import datetime, timedelta, timezone
 
@@ -16,7 +17,6 @@ print("🚀 Trend + RS + Breakout System Starting...", flush=True)
 
 API_KEY = os.getenv("ALPACA_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -30,19 +30,53 @@ BENCHMARK = "QQQ"
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-# ✅ تأكيد الحساب المتصل
 account = trading_client.get_account()
 print("Connected Equity:", account.equity, flush=True)
 
+# ==============================
+# LOGGER SETUP
+# ==============================
 
-# ===== GLOBAL STATE =====
+LOG_FILE = "trades_log.csv"
+
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "date_open",
+            "symbol",
+            "entry",
+            "stop",
+            "target",
+            "exit",
+            "result",
+            "r_multiple"
+        ])
+
+def log_trade(trade_data):
+    with open(LOG_FILE, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            trade_data["date_open"],
+            trade_data["symbol"],
+            trade_data["entry"],
+            trade_data["stop"],
+            trade_data["target"],
+            trade_data["exit"],
+            trade_data["result"],
+            trade_data["r_multiple"]
+        ])
+
+# ==============================
+# GLOBAL STATE
+# ==============================
+
 current_trade = None
 daily_loss_count = 0
 last_premarket_alert_date = None
 
-
 # ==============================
-# DATA FUNCTIONS
+# DATA
 # ==============================
 
 def fetch_bars(symbol):
@@ -63,20 +97,16 @@ def fetch_bars(symbol):
     if df.empty:
         return None
 
-    df = df.reset_index()
-    return df
-
+    return df.reset_index()
 
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
-
 
 # ==============================
 # TRADE ENGINE
 # ==============================
 
 def check_breakout_and_open_trade(symbol, df):
-    manage_open_trade(symbol, df)
     global current_trade, daily_loss_count
 
     if current_trade is not None:
@@ -87,19 +117,19 @@ def check_breakout_and_open_trade(symbol, df):
 
     recent_high = df["high"].iloc[-51:-1].max()
 
-    # شرط شمعتين تأكيد
     if df["close"].iloc[-2] > recent_high and df["close"].iloc[-1] > recent_high:
 
         entry = df["close"].iloc[-1]
         stop = df["low"].iloc[-6:-1].min()
-
         risk = entry - stop
+
         if risk <= 0:
             return
 
         target = entry + (2 * risk)
 
         current_trade = {
+            "date_open": datetime.now(timezone.utc),
             "symbol": symbol,
             "entry": entry,
             "stop": stop,
@@ -111,19 +141,14 @@ def check_breakout_and_open_trade(symbol, df):
         message = (
             f"📈 PAPER TRADE OPENED\n\n"
             f"Symbol: {symbol}\n"
-            f"Entry: {round(entry, 2)}\n"
-            f"Stop: {round(stop, 2)}\n"
-            f"Target (2R): {round(target, 2)}\n"
-            f"Risk (1R): {round(risk, 2)}"
+            f"Entry: {round(entry,2)}\n"
+            f"Stop: {round(stop,2)}\n"
+            f"Target: {round(target,2)}"
         )
 
         print(message, flush=True)
         send_telegram(message)
 
-
-# ==============================
-# ANALYSIS
-# ==============================
 def manage_open_trade(symbol, df):
     global current_trade, daily_loss_count
 
@@ -141,84 +166,54 @@ def manage_open_trade(symbol, df):
     target = current_trade["target"]
     risk = current_trade["risk"]
 
-    # ===== Check 1R move =====
-    if not current_trade["moved_to_half_r"]:
-        if high_price >= entry + risk:
-            new_stop = entry + (0.5 * risk)
-            current_trade["stop"] = new_stop
-            current_trade["moved_to_half_r"] = True
-
-            message = (
-                f"🔄 STOP MOVED TO +0.5R\n\n"
-                f"Symbol: {symbol}\n"
-                f"New Stop: {round(new_stop,2)}"
-            )
-
-            print(message, flush=True)
-            send_telegram(message)
-
-    # ===== Check Target (2R) =====
+    # 2R target
     if high_price >= target:
-        message = (
-            f"🎯 TARGET HIT (2R)\n\n"
-            f"Symbol: {symbol}\n"
-            f"Exit: {round(target,2)}"
-        )
 
-        print(message, flush=True)
-        send_telegram(message)
+        trade_data = {
+            **current_trade,
+            "exit": target,
+            "result": "WIN",
+            "r_multiple": 2
+        }
 
+        log_trade(trade_data)
+
+        send_telegram(f"🎯 TARGET HIT 2R | {symbol}")
         current_trade = None
         return
 
-    # ===== Check Stop =====
-    if low_price <= current_trade["stop"]:
-        message = (
-            f"❌ STOP HIT\n\n"
-            f"Symbol: {symbol}\n"
-            f"Exit: {round(current_trade['stop'],2)}"
-        )
+    # Stop
+    if low_price <= stop:
 
-        print(message, flush=True)
-        send_telegram(message)
+        trade_data = {
+            **current_trade,
+            "exit": stop,
+            "result": "LOSS",
+            "r_multiple": -1
+        }
 
+        log_trade(trade_data)
+
+        send_telegram(f"❌ STOP HIT | {symbol}")
         daily_loss_count += 1
         current_trade = None
         return
-        
+
+# ==============================
+# ANALYSIS
+# ==============================
+
 def analyze_symbol(symbol, benchmark_df):
     df = fetch_bars(symbol)
 
     if df is None or len(df) < 250:
-        print(f"{symbol} → Not enough data", flush=True)
         return
 
     df["EMA200"] = calculate_ema(df["close"], 200)
     df["EMA50"] = calculate_ema(df["close"], 50)
 
-    latest = df.iloc[-1]
-
-    # Trend
-    if latest["close"] > latest["EMA200"] and latest["EMA50"] > latest["EMA200"]:
-        trend = "UP"
-    else:
-        trend = "DOWN"
-
-    # Relative Strength
-    if len(df) < 120 or len(benchmark_df) < 120:
-        rs_status = "N/A"
-    else:
-        stock_return = (df["close"].iloc[-1] - df["close"].iloc[-100]) / df["close"].iloc[-100]
-        bench_return = (benchmark_df["close"].iloc[-1] - benchmark_df["close"].iloc[-100]) / benchmark_df["close"].iloc[-100]
-        rs_status = "STRONG" if stock_return > bench_return else "WEAK"
-
-    message = f"{symbol} → Trend: {trend} | RS: {rs_status}"
-    print(message, flush=True)
-    
     check_breakout_and_open_trade(symbol, df)
     manage_open_trade(symbol, df)
-
-
 
 # ==============================
 # TELEGRAM
@@ -236,7 +231,6 @@ def send_telegram(message):
     except:
         pass
 
-
 # ==============================
 # MAIN LOOP
 # ==============================
@@ -244,40 +238,11 @@ def send_telegram(message):
 while True:
 
     clock = trading_client.get_clock()
-    now_utc = datetime.now(timezone.utc)
 
-    # ===== MARKET CLOSED =====
     if not clock.is_open:
-
-        next_open = clock.next_open
-        minutes_to_open = (next_open - now_utc).total_seconds() / 60
-        today_date = now_utc.date()
-
-        if 0 < minutes_to_open <= 30 and last_premarket_alert_date != today_date:
-
-            ny_tz = pytz.timezone("America/New_York")
-            dubai_tz = pytz.timezone("Asia/Dubai")
-
-            ny_time = next_open.astimezone(ny_tz)
-            dubai_time = next_open.astimezone(dubai_tz)
-
-            message = (
-                "🚨 NASDAQ opens in 30 minutes!\n\n"
-                f"🇺🇸 NY Time: {ny_time.strftime('%H:%M')}\n"
-                f"🇦🇪 UAE Time: {dubai_time.strftime('%H:%M')}\n\n"
-                "جهّز نفسك يا بطل 💪"
-            )
-
-            send_telegram(message)
-            last_premarket_alert_date = today_date
-            print("Pre-market alert sent", flush=True)
-
-        print("🛑 Market is CLOSED", flush=True)
+        print("🛑 Market Closed", flush=True)
         time.sleep(60)
         continue
-
-    # ===== MARKET OPEN =====
-    print("\n🔄 Market OPEN — Running Analysis\n", flush=True)
 
     benchmark_df = fetch_bars(BENCHMARK)
 
@@ -288,5 +253,4 @@ while True:
     for symbol in SYMBOLS:
         analyze_symbol(symbol, benchmark_df)
 
-    print("\n⏳ Waiting 15 minutes...\n", flush=True)
     time.sleep(900)
