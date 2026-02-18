@@ -17,7 +17,7 @@ SYMBOLS = ["BBAI", "ONDS", "NVTS"]
 BENCHMARK = "QQQ"
 
 
-RISK_PERCENT = 0.03 LOG_FILE = “trades_log.csv”
+RISK_PERCENT = 0.03 LOG_FILE = "trades_log.csv"
 
 ==============================
 
@@ -25,11 +25,11 @@ ENV
 
 ==============================
 
-API_KEY = os.getenv(“ALPACA_API_KEY”) SECRET_KEY =
-os.getenv(“ALPACA_SECRET_KEY”) BOT_TOKEN =
-os.getenv(“TELEGRAM_BOT_TOKEN”) CHAT_ID = os.getenv(“TELEGRAM_CHAT_ID”)
+API_KEY = os.getenv("ALPACA_API_KEY") SECRET_KEY =
+os.getenv("ALPACA_SECRET_KEY") BOT_TOKEN =
+os.getenv("TELEGRAM_BOT_TOKEN") CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not API_KEY or not SECRET_KEY: print(“Missing API keys”) exit()
+if not API_KEY or not SECRET_KEY: print("Missing API keys") exit()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -52,10 +52,10 @@ CSV INIT
 
 ==============================
 
-if not os.path.exists(LOG_FILE): with open(LOG_FILE, mode=“w”,
-newline=““) as file: writer = csv.writer(file) writer.writerow([
-“date_open”, “symbol”, “entry”, “stop”, “target”, “exit”, “result”,
-“r_multiple” ])
+if not os.path.exists(LOG_FILE): with open(LOG_FILE, mode="w",
+newline="") as file: writer = csv.writer(file) writer.writerow([
+"date_open", "symbol", "entry", "stop", "target", "exit", "result",
+"r_multiple" ])
 
 ==============================
 
@@ -64,13 +64,13 @@ UTIL
 ==============================
 
 def send_telegram(message): if not BOT_TOKEN or not CHAT_ID: return url
-= f”https://api.telegram.org/bot{BOT_TOKEN}/sendMessage”
-requests.post(url, data={“chat_id”: CHAT_ID, “text”: message})
+= f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+requests.post(url, data={"chat_id": CHAT_ID, "text": message})
 
-def log_trade(data): with open(LOG_FILE, mode=“a”, newline=““) as file:
-writer = csv.writer(file) writer.writerow([ data[“date_open”],
-data[“symbol”], data[“entry”], data[“stop”], data[“target”],
-data[“exit”], data[“result”], data[“r_multiple”] ])
+def log_trade(data): with open(LOG_FILE, mode="a", newline="") as file:
+writer = csv.writer(file) writer.writerow([ data["date_open"],
+data["symbol"], data["entry"], data["stop"], data["target"],
+data["exit"], data["result"], data["r_multiple"] ])
 
 ==============================
 
