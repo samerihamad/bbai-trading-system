@@ -13,7 +13,9 @@ CONFIG
 
 ==============================
 
-SYMBOLS = [“BBAI”, “ONDS”, “NVTS”] BENCHMARK = “QQQ”
+SYMBOLS = ["BBAI", "ONDS", "NVTS"]
+BENCHMARK = "QQQ"
+
 
 RISK_PERCENT = 0.03 LOG_FILE = “trades_log.csv”
 
