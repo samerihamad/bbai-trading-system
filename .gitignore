@@ -1,0 +1,8 @@
+# لا ترفع هذه الملفات على GitHub أبداً
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+logs/
+*.log
