@@ -20,8 +20,8 @@ INITIAL_EQUITY = 1000
 LOOKBACK_DAYS = 180  # 6 months
 TIMEFRAME = TimeFrame.Hour
 
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+API_KEY = os.getenv("PK6VKM4IJFHPY5JFFFIYFJQWHR")
+SECRET_KEY = os.getenv("5FWbPVJSf5EGZy7ZNSnPqWoaFW7zhmwnB7HdZw4pAGiL")
 
 if not API_KEY or not SECRET_KEY:
     print("Missing API keys")
