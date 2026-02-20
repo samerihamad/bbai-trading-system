@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 LOOKBACK_DAYS = 180
 PRICE_LIMIT = 20
-MAX_SYMBOLS_TO_SCAN = 200  # لتسريع العملية
+MAX_SYMBOLS_TO_SCAN = 100  # لتسريع العملية
 
 # ==============================
 # GET NASDAQ SYMBOLS
