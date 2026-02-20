@@ -1,81 +1,92 @@
-import yfinance as yf
-import pandas as pd
-from datetime import datetime, timedelta
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
+
+from datetime import datetime, timedelta, timezone
+import os
 
 # ==============================
 # CONFIG
 # ==============================
 
-LOOKBACK_DAYS = 180
 PRICE_LIMIT = 20
-MAX_SYMBOLS = 150   # لتسريع الفحص
+LOOKBACK_DAYS = 180
+
+CANDIDATE_SYMBOLS = [
+    "ONDS", "BBAI", "RCAT", "NVTS", "MARA",
+    "RIOT", "SOFI", "PLTR", "FUBO", "LCID",
+    "HOOD", "DKNG", "RUN", "OPEN", "BB"
+]
 
 # ==============================
-# GET SYMBOL LIST FROM ETF
+# ENV
 # ==============================
 
-def get_symbols_from_etf():
-    # نستخدم ETF يحتوي شركات NASDAQ
-    etf = yf.Ticker("QQQ")
-    holdings = etf.get_holdings()
-    symbols = holdings.index.tolist()
-    return symbols[:MAX_SYMBOLS]
+API_KEY = os.getenv("APK6VKM4IJFHPY5JFFFIYFJQWHR")
+SECRET_KEY = os.getenv("5FWbPVJSf5EGZy7ZNSnPqWoaFW7zhmwnB7HdZw4pAGiL")
+
+data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 # ==============================
 # MAIN
 # ==============================
 
-symbols = get_symbols_from_etf()
-
-end_date = datetime.now()
-start_date = end_date - timedelta(days=LOOKBACK_DAYS)
+end = datetime.now(timezone.utc)
+start = end - timedelta(days=LOOKBACK_DAYS)
 
 results = []
 
-print("Scanning symbols...\n")
+print("Scanning symbols using Alpaca...\n")
 
-for symbol in symbols:
+for symbol in CANDIDATE_SYMBOLS:
     try:
-        df = yf.download(
-            symbol,
-            start=start_date,
-            end=end_date,
-            interval="1d",
-            progress=False
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            feed=DataFeed.IEX
         )
 
-        if df.empty or len(df) < 30:
+        bars = data_client.get_stock_bars(request).df
+
+        if bars.empty:
             continue
 
-        price = float(df["Close"].iloc[-1])
+        bars = bars.reset_index()
 
-        if price > PRICE_LIMIT:
+        current_price = float(bars["close"].iloc[-1])
+
+        if current_price > PRICE_LIMIT:
             continue
 
-        avg_volume = df["Volume"].mean()
+        avg_volume = bars["volume"].mean()
 
         results.append({
             "symbol": symbol,
-            "price": round(price, 2),
+            "price": round(current_price, 2),
             "avg_volume": avg_volume
         })
 
-    except:
+    except Exception as e:
         continue
 
+# ==============================
+# SORT & PRINT
+# ==============================
+
 if len(results) == 0:
-    print("No symbols found under price limit.")
+    print("No valid symbols found.")
 else:
-    df_results = pd.DataFrame(results)
-    df_results = df_results.sort_values(by="avg_volume", ascending=False)
+    results = sorted(results, key=lambda x: x["avg_volume"], reverse=True)
 
     print("\n====================================")
     print("TOP 3 MOST LIQUID (< $20)")
     print("====================================\n")
 
-    for i in range(min(3, len(df_results))):
-        row = df_results.iloc[i]
-        print(f"Symbol: {row['symbol']}")
-        print(f"Price: ${row['price']}")
-        print(f"Avg Volume (6m): {int(row['avg_volume']):,}")
+    for stock in results[:3]:
+        print(f"Symbol: {stock['symbol']}")
+        print(f"Price: ${stock['price']}")
+        print(f"Avg Volume (6m): {int(stock['avg_volume']):,}")
         print("------------------------------------")
