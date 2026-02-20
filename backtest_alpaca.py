@@ -20,12 +20,16 @@ INITIAL_EQUITY = 1000
 LOOKBACK_DAYS = 180  # 6 months
 TIMEFRAME = TimeFrame.Hour
 
-API_KEY = os.getenv("PK6VKM4IJFHPY5JFFFIYFJQWHR")
-SECRET_KEY = os.getenv("5FWbPVJSf5EGZy7ZNSnPqWoaFW7zhmwnB7HdZw4pAGiL")
+#API_KEY = os.getenv("PK6VKM4IJFHPY5JFFFIYFJQWHR")
+#SECRET_KEY = os.getenv("5FWbPVJSf5EGZy7ZNSnPqWoaFW7zhmwnB7HdZw4pAGiL")
 
-if not API_KEY or not SECRET_KEY:
-    print("Missing API keys")
-    exit()
+API_KEY = "PK6VKM4IJFHPY5JFFFIYFJQWHR"
+SECRET_KEY = "5FWbPVJSf5EGZy7ZNSnPqWoaFW7zhmwnB7HdZw4pAGiL"
+
+# if not API_KEY or not SECRET_KEY:
+#    print("Missing API keys")
+#    exit()
+
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
