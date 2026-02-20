@@ -1,6 +1,0 @@
-requests==2.31.0
-pandas==1.5.3
-numpy==1.23.5
-schedule==1.2.1
-pytz==2024.1
-python-dotenv==1.0.0
