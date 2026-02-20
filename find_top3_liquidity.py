@@ -1,4 +1,3 @@
-
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -9,28 +8,29 @@ from datetime import datetime, timedelta
 
 LOOKBACK_DAYS = 180
 PRICE_LIMIT = 20
-MAX_SYMBOLS_TO_SCAN = 100  # لتسريع العملية
+MAX_SYMBOLS = 150   # لتسريع الفحص
 
 # ==============================
-# GET NASDAQ SYMBOLS
+# GET SYMBOL LIST FROM ETF
 # ==============================
 
-def get_nasdaq_symbols():
-    url = "https://old.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-    df = pd.read_csv(url, sep="|")
-    symbols = df["Symbol"].tolist()
-    return symbols[:MAX_SYMBOLS_TO_SCAN]
+def get_symbols_from_etf():
+    # نستخدم ETF يحتوي شركات NASDAQ
+    etf = yf.Ticker("QQQ")
+    holdings = etf.get_holdings()
+    symbols = holdings.index.tolist()
+    return symbols[:MAX_SYMBOLS]
 
 # ==============================
 # MAIN
 # ==============================
 
-symbols = get_nasdaq_symbols()
-
-results = []
+symbols = get_symbols_from_etf()
 
 end_date = datetime.now()
 start_date = end_date - timedelta(days=LOOKBACK_DAYS)
+
+results = []
 
 print("Scanning symbols...\n")
 
@@ -47,39 +47,34 @@ for symbol in symbols:
         if df.empty or len(df) < 30:
             continue
 
-        current_price = df["Close"].iloc[-1]
+        price = float(df["Close"].iloc[-1])
 
-        if current_price > PRICE_LIMIT:
+        if price > PRICE_LIMIT:
             continue
 
         avg_volume = df["Volume"].mean()
 
         results.append({
             "symbol": symbol,
-            "price": round(current_price, 2),
+            "price": round(price, 2),
             "avg_volume": avg_volume
         })
 
     except:
         continue
 
-# ==============================
-# SORT & PICK TOP 3
-# ==============================
-
-results_df = pd.DataFrame(results)
-
-if results_df.empty:
-    print("No valid symbols found.")
+if len(results) == 0:
+    print("No symbols found under price limit.")
 else:
-    results_df = results_df.sort_values(by="avg_volume", ascending=False)
-    top3 = results_df.head(3)
+    df_results = pd.DataFrame(results)
+    df_results = df_results.sort_values(by="avg_volume", ascending=False)
 
     print("\n====================================")
     print("TOP 3 MOST LIQUID (< $20)")
     print("====================================\n")
 
-    for _, row in top3.iterrows():
+    for i in range(min(3, len(df_results))):
+        row = df_results.iloc[i]
         print(f"Symbol: {row['symbol']}")
         print(f"Price: ${row['price']}")
         print(f"Avg Volume (6m): {int(row['avg_volume']):,}")
