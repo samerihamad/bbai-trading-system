@@ -176,3 +176,13 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+
+### `requirements.txt`
+```
+alpaca-py>=0.13.0
+pandas>=2.0.0
+numpy>=1.24.0
+pytz>=2024.1
+requests>=2.31.0
+python-dotenv>=1.0.0
