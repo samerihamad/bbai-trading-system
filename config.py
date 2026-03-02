@@ -1,64 +1,64 @@
-# =============================================================
-# config.py — كل إعدادات النظام في مكان واحد
-# عدّل هذا الملف فقط عند تغيير أي إعداد
-# =============================================================
-
+"""
+config.py — Single source of truth for all configuration values.
+All modules import from here. Never hardcode values elsewhere.
+"""
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  # يقرأ من ملف .env تلقائياً
+load_dotenv()
 
-# ─────────────────────────────────────────
-# 1. إعدادات Alpaca
-# ─────────────────────────────────────────
+# ─── Alpaca ────────────────────────────────────────────────────────────────
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL   = "https://paper-api.alpaca.markets"  # Paper Trading
-ALPACA_DATA_URL   = "https://data.alpaca.markets"
+ALPACA_BASE_URL   = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+IS_PAPER          = "paper" in ALPACA_BASE_URL.lower()
 
-# ─────────────────────────────────────────
-# 2. إعدادات Telegram
-# ─────────────────────────────────────────
+# ─── Telegram ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ─────────────────────────────────────────
-# 3. إدارة المخاطرة
-# ─────────────────────────────────────────
-RISK_PER_TRADE      = 0.03   # 3% من الرصيد الحالي لكل صفقة
-MAX_DAILY_LOSSES    = 2      # إيقاف النظام بعد خسارتين في اليوم
-STRATEGY2_LEVERAGE  = 2.0   # رافعة مالية × 2
+# ─── Universe ─────────────────────────────────────────────────────────────
+UNIVERSE_MAX_CANDIDATES = 500
+UNIVERSE_MIN_PRICE      = 5.0
+UNIVERSE_MAX_PRICE      = 500.0
+UNIVERSE_MIN_VOLUME     = 500_000
 
-# ─────────────────────────────────────────
-# 4. اختيار الأسهم
-# ─────────────────────────────────────────
-UNIVERSE_SIZE       = 50          # عدد الأسهم التي يفحصها النظام يومياً
-MIN_AVG_VOLUME      = 500_000    # أقل حجم تداول يومي مقبول
-MIN_PRICE           = 10.0        # أقل سعر للسهم مقبول
+# ─── Timing ───────────────────────────────────────────────────────────────
+LOOP_INTERVAL_SECONDS = 30
+TIMEZONE              = "America/New_York"   # pytz handles EST/EDT automatically
+MARKET_OPEN_TIME      = "09:35"
+MARKET_CLOSE_TIME     = "15:45"
 
-# ─────────────────────────────────────────
-# 5. استراتيجية Mean Reversion
-# ─────────────────────────────────────────
-S2_RSI_PERIOD       = 14          # فترة RSI
-S2_RSI_OVERSOLD     = 30          # RSI تحت 30 → تشبع بيعي عادي
-S2_RSI_HIGH_QUALITY = 25          # RSI تحت 25 → تشبع بيعي عالي الجودة
-S2_VWAP_MIN_DEV     = 0.015       # الحد الأدنى للابتعاد عن VWAP = 1.5%
-S2_ATR_MIN_PCT      = 0.008       # أدنى ATR مقبول (0.8%) — تجنب السوق الراكد
-S2_ATR_MAX_PCT      = 0.030       # أقصى ATR مقبول (3.0%) — تجنب التقلب الشديد
-S2_TP1_R            = 1.0         # الهدف الأول = 1R  (50% من الكمية)
-S2_TP2_R            = 3.0         # الهدف الثاني = 3R (50% من الكمية)
+# ─── Risk & Position Sizing ───────────────────────────────────────────────
+MAX_LONG            = 2
+MAX_SHORT           = 1
+MAX_TOTAL           = 3
+RISK_PER_TRADE_PCT  = 0.01
+MIN_POSITION_VALUE  = 500.0
+MAX_POSITION_VALUE  = 5_000.0
 
-# ─────────────────────────────────────────
-# 6. توقيت السوق (بتوقيت نيويورك)
-# ─────────────────────────────────────────
-MARKET_OPEN              = "09:30"
-MARKET_CLOSE             = "16:00"
-PRE_MARKET_ALERT         = 30     # تنبيه قبل الافتتاح بـ 30 دقيقة
-NO_OPPORTUNITY_INTERVAL  = 60     # تنبيه "لا توجد فرصة" كل 60 دقيقة
-TIMEZONE                 = "America/New_York"
+# ─── Strategy Parameters ──────────────────────────────────────────────────
+RSI_OVERSOLD          = 30
+RSI_OVERBOUGHT        = 70
+VWAP_THRESHOLD_PCT    = 1.2 / 100
+ATR_MIN_PCT           = 0.7 / 100
+ATR_MAX_PCT           = 3.5 / 100
+EMA_SHORT             = 9
+EMA_LONG              = 21
+EMA_TREND             = 200
 
-# ─────────────────────────────────────────
-# 7. إعدادات البيانات
-# ─────────────────────────────────────────
-CANDLE_INTERVAL     = "5Min"      # الفريم الزمني الرئيسي
-HISTORY_BARS        = 250         # عدد الشموع التاريخية للتحليل
+PROFIT_FACTOR_CUT     = 0.20
+STOP_LOSS_ATR_MULT    = 1.5
+TAKE_PROFIT_ATR_MULT  = 3.0
+
+# ─── Liquidity Sweep ──────────────────────────────────────────────────────
+LIQUIDITY_SWEEP_ENABLED = True
+
+# ─── SHORT Selling ────────────────────────────────────────────────────────
+SHORT_ENABLED      = IS_PAPER
+SHORT_EXCHANGES    = {"NASDAQ", "NYSE"}
+SHORT_RSI_MIN      = RSI_OVERBOUGHT   # RSI > 70
+
+# ─── Logging ──────────────────────────────────────────────────────────────
+LOG_LEVEL = "INFO"
+LOG_FILE  = "trading.log"
