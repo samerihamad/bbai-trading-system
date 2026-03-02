@@ -1,142 +1,405 @@
-"""
-strategy_meanrev.py — Mean Reversion + Liquidity Sweep strategy.
-Reads ALL parameters from config.py.
-Supports LONG and SHORT signals.
-"""
-import logging
-import numpy as np
+# =============================================================
+# strategy_meanrev.py — استراتيجية Mean Reversion
+# تدعم LONG و SHORT — كل القيم مستوردة من config.py
+# =============================================================
+
+import requests
 import pandas as pd
-from typing import Optional, Dict, Tuple
-import config
+import numpy as np
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+from config import (
+    ALPACA_API_KEY,
+    ALPACA_SECRET_KEY,
+    ALPACA_DATA_URL,
+    S2_RSI_PERIOD,
+    S2_RSI_OVERSOLD,
+    S2_RSI_HIGH_QUALITY,
+    S2_RSI_OVERBOUGHT,
+    S2_VWAP_MIN_DEV,
+    S2_ATR_MIN_PCT,
+    S2_ATR_MAX_PCT,
+    S2_TP1_R,
+    S2_TP2_R,
+    S2_STOP_ATR_MULT,
+    LIQUIDITY_SWEEP_ENABLED,
+    SHORT_ENABLED,
+    SHORT_EXCHANGES,
+    EMA_TREND,
+    HISTORY_BARS,
+)
+
+HEADERS = {
+    "APCA-API-KEY-ID":     ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+}
 
 
-def compute_rsi(closes: pd.Series, period: int = 14) -> float:
+# ─────────────────────────────────────────
+# نموذج إشارة التداول
+# ─────────────────────────────────────────
+
+@dataclass
+class MeanRevSignal:
+    ticker:         str
+    side:           str       # 'long' أو 'short'
+    has_signal:     bool
+    reason:         str
+
+    # أسعار الدخول والخروج
+    entry_price:    float = 0.0
+    stop_loss:      float = 0.0
+    target_tp1:     float = 0.0
+    target_tp2:     float = 0.0
+    trail_step:     float = 0.0
+
+    # مؤشرات التحليل
+    rsi:            float = 0.0
+    atr:            float = 0.0
+    atr_pct:        float = 0.0
+    vwap:           float = 0.0
+    ema200:         float = 0.0
+    signal_quality: str   = "standard"   # 'high' أو 'standard'
+    liquidity_sweep: bool = False
+
+
+# ─────────────────────────────────────────
+# 1. جلب البيانات
+# ─────────────────────────────────────────
+
+def fetch_bars(ticker: str, days: int = HISTORY_BARS) -> pd.DataFrame:
+    """
+    يجلب الشموع اليومية للتحليل.
+    يُرجع DataFrame مع أعمدة: open, high, low, close, volume
+    """
+    end   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.utcnow() - timedelta(days=days + 30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        response = requests.get(
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
+            headers=HEADERS,
+            params={
+                "timeframe": "1Day",
+                "start":     start,
+                "end":       end,
+                "limit":     days,
+                "feed":      "iex",
+            },
+            timeout=15,
+        )
+        bars = response.json().get("bars", [])
+        if not bars:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(bars)
+        df = df.rename(columns={"o": "open", "h": "high", "l": "low",
+                                 "c": "close", "v": "volume"})
+        df["time"] = pd.to_datetime(df["t"])
+        return df.sort_values("time").reset_index(drop=True)
+
+    except Exception as e:
+        print(f"❌ خطأ في جلب بيانات {ticker}: {e}")
+        return pd.DataFrame()
+
+
+# ─────────────────────────────────────────
+# 2. حساب المؤشرات الفنية
+# ─────────────────────────────────────────
+
+def calc_rsi(closes: pd.Series, period: int = S2_RSI_PERIOD) -> float:
+    """يحسب مؤشر RSI ويُرجع آخر قيمة."""
     delta = closes.diff()
     gain  = delta.clip(lower=0).rolling(period).mean()
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
     rs    = gain / loss.replace(0, np.nan)
     rsi   = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
+    val   = rsi.iloc[-1]
+    return round(float(val) if not pd.isna(val) else 50.0, 2)
 
 
-def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """يحسب Average True Range ويُرجع آخر قيمة."""
+    prev_close = df["close"].shift(1)
     tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs()
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
     ], axis=1).max(axis=1)
-    return float(tr.rolling(period).mean().iloc[-1])
+    atr = tr.rolling(period).mean().iloc[-1]
+    return round(float(atr) if not pd.isna(atr) else 0.0, 4)
 
 
-def compute_vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> float:
-    typical = (high + low + close) / 3
-    return float((typical * volume).cumsum() / volume.cumsum().iloc[-1])
-
-
-def compute_ema(closes: pd.Series, span: int) -> float:
-    return float(closes.ewm(span=span, adjust=False).mean().iloc[-1])
-
-
-def liquidity_sweep_long(high: pd.Series, low: pd.Series, close: pd.Series) -> bool:
+def calc_vwap(df: pd.DataFrame) -> float:
     """
-    Bullish liquidity sweep:
-    Yesterday's low was broken intrabar but current candle CLOSED above yesterday's low.
+    يحسب VWAP اليومي.
+    VWAP = مجموع(السعر النموذجي × الحجم) ÷ مجموع الحجم
     """
-    if not config.LIQUIDITY_SWEEP_ENABLED or len(low) < 2:
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    vwap    = (typical * df["volume"]).sum() / df["volume"].sum()
+    return round(float(vwap) if not pd.isna(vwap) else 0.0, 4)
+
+
+def calc_ema(closes: pd.Series, span: int) -> float:
+    """يحسب EMA ويُرجع آخر قيمة."""
+    ema = closes.ewm(span=span, adjust=False).mean().iloc[-1]
+    return round(float(ema) if not pd.isna(ema) else 0.0, 4)
+
+
+# ─────────────────────────────────────────
+# 3. Liquidity Sweep
+# ─────────────────────────────────────────
+
+def check_liquidity_sweep_long(df: pd.DataFrame) -> bool:
+    """
+    Bullish Liquidity Sweep:
+    الشمعة الأخيرة كسرت قاع أمس (امتصاص البيع)
+    ثم أغلقت فوق قاع أمس → إشارة قوة.
+    """
+    if not LIQUIDITY_SWEEP_ENABLED or len(df) < 2:
         return False
-    prev_low    = float(low.iloc[-2])
-    curr_low    = float(low.iloc[-1])
-    curr_close  = float(close.iloc[-1])
+
+    prev_low   = df["low"].iloc[-2]
+    curr_low   = df["low"].iloc[-1]
+    curr_close = df["close"].iloc[-1]
+
     return curr_low < prev_low and curr_close > prev_low
 
 
-def liquidity_sweep_short(high: pd.Series, low: pd.Series, close: pd.Series) -> bool:
+def check_liquidity_sweep_short(df: pd.DataFrame) -> bool:
     """
-    Bearish liquidity sweep:
-    Yesterday's high was broken intrabar but current candle CLOSED below yesterday's high.
+    Bearish Liquidity Sweep:
+    الشمعة الأخيرة كسرت قمة أمس (امتصاص الشراء)
+    ثم أغلقت تحت قمة أمس → إشارة ضعف.
     """
-    if not config.LIQUIDITY_SWEEP_ENABLED or len(high) < 2:
+    if not LIQUIDITY_SWEEP_ENABLED or len(df) < 2:
         return False
-    prev_high   = float(high.iloc[-2])
-    curr_high   = float(high.iloc[-1])
-    curr_close  = float(close.iloc[-1])
+
+    prev_high  = df["high"].iloc[-2]
+    curr_high  = df["high"].iloc[-1]
+    curr_close = df["close"].iloc[-1]
+
     return curr_high > prev_high and curr_close < prev_high
 
 
-def evaluate(bars: pd.DataFrame, asset: Dict) -> Optional[Dict]:
+# ─────────────────────────────────────────
+# 4. تحديث الوقف المتحرك
+# ─────────────────────────────────────────
+
+def update_trailing_stop(
+    current_price: float,
+    current_stop:  float,
+    trail_step:    float,
+) -> float:
     """
-    Evaluate a symbol and return a signal dict or None.
-    bars: DataFrame with columns [open, high, low, close, volume] — last 250 rows minimum.
-    asset: dict with keys symbol, exchange, ema200, easy_to_borrow.
+    يحرّك وقف الخسارة لأعلى مع ارتفاع السعر.
+    trail_step: المسافة المطلوبة للتحريك (بالدولار)
     """
-    if len(bars) < config.EMA_TREND + 10:
-        return None
+    new_stop = current_price - trail_step
+    return round(max(new_stop, current_stop), 4)
 
-    closes  = bars["close"]
-    highs   = bars["high"]
-    lows    = bars["low"]
-    volumes = bars["volume"]
-    price   = float(closes.iloc[-1])
 
-    # ── Indicators ──────────────────────────────────────────────────────────
-    rsi    = compute_rsi(closes)
-    atr    = compute_atr(highs, lows, closes)
-    vwap   = compute_vwap(highs, lows, closes, volumes)
-    ema200 = asset.get("ema200") or compute_ema(closes, config.EMA_TREND)
-    ema9   = compute_ema(closes, config.EMA_SHORT)
-    ema21  = compute_ema(closes, config.EMA_LONG)
+# ─────────────────────────────────────────
+# 5. تحديث قائمة الأسهم المسموح بها
+# ─────────────────────────────────────────
 
-    atr_pct = atr / price if price else 0
+def refresh_allowed_tickers(candidate_tickers: list[str]):
+    """
+    يُحدّث الفلترة الديناميكية للأسهم.
+    يُستدعى من main.py في روتين ما قبل الافتتاح.
+    """
+    print(f"🔄 تحديث قائمة الأسهم المسموح بها: {len(candidate_tickers)} سهم")
+    # يمكن توسيع هذه الدالة لاحقاً لإضافة فلاتر أداء تاريخي
 
-    # ── ATR filter (volatility window) ───────────────────────────────────────
-    if not (config.ATR_MIN_PCT <= atr_pct <= config.ATR_MAX_PCT):
-        return None
 
-    # ── LONG Signal ──────────────────────────────────────────────────────────
-    vwap_diff_pct = (price - vwap) / vwap if vwap else 0
-    long_vwap_ok  = vwap_diff_pct <= config.VWAP_THRESHOLD_PCT   # price ≤ VWAP+1.2%
-    long_rsi_ok   = rsi < config.RSI_OVERSOLD
-    long_trend_ok = price > ema200
-    long_sweep    = liquidity_sweep_long(highs, lows, closes)
+# ─────────────────────────────────────────
+# 6. التحليل الرئيسي — LONG
+# ─────────────────────────────────────────
 
-    if long_rsi_ok and long_vwap_ok and long_trend_ok:
-        confidence = 0.6 + (0.2 if long_sweep else 0) + (0.2 if ema9 > ema21 else 0)
-        return {
-            "symbol":     asset["symbol"],
-            "side":       "long",
-            "price":      price,
-            "atr":        atr,
-            "rsi":        rsi,
-            "vwap":       vwap,
-            "ema200":     ema200,
-            "confidence": confidence,
-            "stop":       price - atr * config.STOP_LOSS_ATR_MULT,
-            "target":     price + atr * config.TAKE_PROFIT_ATR_MULT,
-        }
+def _analyze_long(
+    ticker:    str,
+    df:        pd.DataFrame,
+    ema_above: bool,
+    ema200:    float,
+) -> MeanRevSignal:
+    """
+    يبحث عن فرصة LONG (شراء) بشروط:
+    1. RSI < 30 (تشبع بيعي)
+    2. السعر بالقرب من VWAP أو تحته (لم يبتعد أكثر من 1.2%)
+    3. ATR في النطاق المقبول (0.7% - 3.5%)
+    4. السهم فوق EMA200 (اتجاه صاعد) — اختياري في السوق الهابط
+    """
+    price   = df["close"].iloc[-1]
+    rsi     = calc_rsi(df["close"])
+    atr     = calc_atr(df)
+    vwap    = calc_vwap(df)
+    atr_pct = atr / price if price > 0 else 0
 
-    # ── SHORT Signal ─────────────────────────────────────────────────────────
-    if config.SHORT_ENABLED and asset.get("exchange") in config.SHORT_EXCHANGES:
-        short_rsi_ok    = rsi > config.SHORT_RSI_MIN               # RSI > 70
-        above_vwap      = price > vwap                             # overextended above VWAP
-        below_ema200    = price < ema200                           # bearish trend
-        short_cond      = short_rsi_ok and (above_vwap or below_ema200)  # ONE of two
-        short_sweep     = liquidity_sweep_short(highs, lows, closes)
+    def no_signal(reason: str) -> MeanRevSignal:
+        return MeanRevSignal(ticker=ticker, side="long", has_signal=False,
+                             reason=reason, rsi=rsi, atr=atr,
+                             atr_pct=atr_pct, vwap=vwap, ema200=ema200)
 
-        if short_cond:
-            confidence = 0.6 + (0.2 if short_sweep else 0) + (0.2 if above_vwap and below_ema200 else 0)
-            return {
-                "symbol":     asset["symbol"],
-                "side":       "short",
-                "price":      price,
-                "atr":        atr,
-                "rsi":        rsi,
-                "vwap":       vwap,
-                "ema200":     ema200,
-                "confidence": confidence,
-                "stop":       price + atr * config.STOP_LOSS_ATR_MULT,
-                "target":     price - atr * config.TAKE_PROFIT_ATR_MULT,
-            }
+    # ── فلتر ATR
+    if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
+        return no_signal(f"ATR خارج النطاق: {atr_pct:.1%} (المطلوب {S2_ATR_MIN_PCT:.1%}-{S2_ATR_MAX_PCT:.1%})")
 
-    return None
+    # ── فلتر RSI
+    if rsi >= S2_RSI_OVERSOLD:
+        return no_signal(f"RSI={rsi:.1f} — لم يصل لمنطقة التشبع البيعي (<{S2_RSI_OVERSOLD})")
+
+    # ── فلتر VWAP — السعر يجب أن يكون بالقرب من VWAP أو تحته
+    if vwap > 0:
+        vwap_dev = (price - vwap) / vwap
+        if vwap_dev > S2_VWAP_MIN_DEV:
+            return no_signal(f"السعر بعيد عن VWAP: {vwap_dev:.1%} (الحد {S2_VWAP_MIN_DEV:.1%})")
+
+    # ── فلتر EMA200 (اختياري في السوق الهابط)
+    if not ema_above:
+        trend_note = "تحت EMA200 (bear fallback)"
+    else:
+        trend_note = "فوق EMA200"
+
+    # ── جودة الإشارة
+    is_high_quality = rsi < S2_RSI_HIGH_QUALITY
+    sweep_long      = check_liquidity_sweep_long(df)
+    quality         = "high" if is_high_quality or sweep_long else "standard"
+
+    # ── حساب أسعار الدخول والخروج
+    stop     = round(price - atr * S2_STOP_ATR_MULT, 2)
+    tp1      = round(price + atr * S2_TP1_R, 2)
+    tp2      = round(price + atr * S2_TP2_R, 2)
+    trail    = round(atr * 0.5, 4)
+
+    reason = (
+        f"LONG ✅ | RSI={rsi:.1f} | ATR={atr_pct:.1%} | {trend_note}"
+        + (" | Liquidity Sweep 🎯" if sweep_long else "")
+        + (" | جودة عالية ⭐" if is_high_quality else "")
+    )
+
+    return MeanRevSignal(
+        ticker=ticker, side="long", has_signal=True, reason=reason,
+        entry_price=price, stop_loss=stop,
+        target_tp1=tp1, target_tp2=tp2, trail_step=trail,
+        rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, ema200=ema200,
+        signal_quality=quality, liquidity_sweep=sweep_long,
+    )
+
+
+# ─────────────────────────────────────────
+# 7. التحليل الرئيسي — SHORT
+# ─────────────────────────────────────────
+
+def _analyze_short(
+    ticker:    str,
+    df:        pd.DataFrame,
+    exchange:  str,
+    ema200:    float,
+) -> MeanRevSignal:
+    """
+    يبحث عن فرصة SHORT (بيع على المكشوف) بشروط:
+    1. RSI > 70 (تشبع شرائي) — إلزامي
+    2. السعر فوق VWAP (ممتد صعوداً) — أو
+    3. السعر تحت EMA200 (اتجاه هابط رئيسي)
+       يكفي شرط واحد من الثاني والثالث
+    """
+    price   = df["close"].iloc[-1]
+    rsi     = calc_rsi(df["close"])
+    atr     = calc_atr(df)
+    vwap    = calc_vwap(df)
+    atr_pct = atr / price if price > 0 else 0
+
+    def no_signal(reason: str) -> MeanRevSignal:
+        return MeanRevSignal(ticker=ticker, side="short", has_signal=False,
+                             reason=reason, rsi=rsi, atr=atr,
+                             atr_pct=atr_pct, vwap=vwap, ema200=ema200)
+
+    # ── التحقق من تفعيل SHORT
+    if not SHORT_ENABLED:
+        return no_signal("SHORT غير مفعّل (live mode)")
+
+    if exchange not in SHORT_EXCHANGES:
+        return no_signal(f"بورصة {exchange} غير مدعومة للشورت")
+
+    # ── فلتر ATR
+    if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
+        return no_signal(f"ATR خارج النطاق: {atr_pct:.1%}")
+
+    # ── الشرط الأول — RSI إلزامي
+    if rsi <= S2_RSI_OVERBOUGHT:
+        return no_signal(f"RSI={rsi:.1f} — لم يصل لمنطقة التشبع الشرائي (>{S2_RSI_OVERBOUGHT})")
+
+    # ── الشرط الثاني أو الثالث — يكفي شرط واحد
+    above_vwap   = price > vwap if vwap > 0 else False
+    below_ema200 = price < ema200 if ema200 > 0 else False
+
+    if not above_vwap and not below_ema200:
+        return no_signal(
+            f"RSI={rsi:.1f} ✅ لكن السعر ليس فوق VWAP ولا تحت EMA200"
+        )
+
+    # ── Liquidity Sweep للشورت
+    sweep_short = check_liquidity_sweep_short(df)
+
+    # ── حساب أسعار الدخول والخروج (عكس LONG)
+    stop  = round(price + atr * S2_STOP_ATR_MULT, 2)
+    tp1   = round(price - atr * S2_TP1_R, 2)
+    tp2   = round(price - atr * S2_TP2_R, 2)
+    trail = round(atr * 0.5, 4)
+
+    cond_str = []
+    if above_vwap:   cond_str.append("فوق VWAP")
+    if below_ema200: cond_str.append("تحت EMA200")
+
+    reason = (
+        f"SHORT ✅ | RSI={rsi:.1f} | {' + '.join(cond_str)}"
+        + (" | Liquidity Sweep 🎯" if sweep_short else "")
+    )
+
+    quality = "high" if above_vwap and below_ema200 else "standard"
+
+    return MeanRevSignal(
+        ticker=ticker, side="short", has_signal=True, reason=reason,
+        entry_price=price, stop_loss=stop,
+        target_tp1=tp1, target_tp2=tp2, trail_step=trail,
+        rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, ema200=ema200,
+        signal_quality=quality, liquidity_sweep=sweep_short,
+    )
+
+
+# ─────────────────────────────────────────
+# 8. الدالة الرئيسية
+# ─────────────────────────────────────────
+
+def analyze(
+    ticker:    str,
+    ema_above: bool = True,
+    exchange:  str  = "NASDAQ",
+    ema200:    float = 0.0,
+) -> MeanRevSignal:
+    """
+    الدالة الوحيدة التي يستدعيها selector.py.
+
+    تُحلل السهم وتُرجع أفضل إشارة متاحة:
+    - تبدأ بـ LONG إذا RSI < 30
+    - تنتقل لـ SHORT إذا RSI > 70 والشروط متوفرة
+    - تُرجع has_signal=False إذا لا توجد فرصة
+    """
+    df = fetch_bars(ticker)
+
+    if df.empty or len(df) < EMA_TREND + 10:
+        return MeanRevSignal(
+            ticker=ticker, side="long", has_signal=False,
+            reason="بيانات غير كافية للتحليل",
+        )
+
+    # محاولة LONG أولاً
+    long_signal = _analyze_long(ticker, df, ema_above, ema200)
+    if long_signal.has_signal:
+        return long_signal
+
+    # محاولة SHORT إذا لم تنجح LONG
+    short_signal = _analyze_short(ticker, df, exchange, ema200)
+    return short_signal
