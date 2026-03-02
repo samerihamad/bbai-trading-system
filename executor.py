@@ -61,19 +61,13 @@ class OpenTrade:
 # ─────────────────────────────────────────
 
 def get_account() -> dict:
-    """يجلب معلومات حساب Alpaca مع طباعة Debug."""
+    """يجلب معلومات حساب Alpaca."""
     try:
-        print(f"DEBUG URL: {ALPACA_BASE_URL}")
-        print(f"DEBUG KEY: {ALPACA_API_KEY[:8] if ALPACA_API_KEY else 'EMPTY'}")
-
         response = requests.get(
             f"{ALPACA_BASE_URL}/v2/account",
             headers=HEADERS,
             timeout=10,
         )
-
-        print(f"DEBUG STATUS: {response.status_code}")
-        print(f"DEBUG BODY: {response.text[:200]}")
 
         data = response.json()
 
