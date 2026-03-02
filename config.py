@@ -1,64 +1,106 @@
-"""
-config.py — Single source of truth for all configuration values.
-All modules import from here. Never hardcode values elsewhere.
-"""
+# =============================================================
+# config.py — مصدر وحيد لكل إعدادات النظام
+# عدّل هذا الملف فقط عند تغيير أي إعداد
+# باقي الملفات تستورد منه مباشرة ولا تحتوي أي قيم ثابتة
+# =============================================================
+
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # يقرأ من ملف .env تلقائياً
 
-# ─── Alpaca ────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# 1. إعدادات Alpaca
+# ─────────────────────────────────────────
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL   = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-IS_PAPER          = "paper" in ALPACA_BASE_URL.lower()
+ALPACA_DATA_URL   = "https://data.alpaca.markets"
 
-# ─── Telegram ─────────────────────────────────────────────────────────────
+# يُحدَّد تلقائياً بناءً على الـ URL
+IS_PAPER = "paper" in ALPACA_BASE_URL.lower()
+
+# ─────────────────────────────────────────
+# 2. إعدادات Telegram
+# ─────────────────────────────────────────
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ─── Universe ─────────────────────────────────────────────────────────────
-UNIVERSE_MAX_CANDIDATES = 500
-UNIVERSE_MIN_PRICE      = 5.0
-UNIVERSE_MAX_PRICE      = 500.0
-UNIVERSE_MIN_VOLUME     = 500_000
+# ─────────────────────────────────────────
+# 3. إدارة المخاطرة
+# ─────────────────────────────────────────
+RISK_PER_TRADE     = 0.03    # 3% من الرصيد الحالي لكل صفقة (Compounding)
+MAX_DAILY_LOSSES   = 2       # إيقاف النظام بعد خسارتين في اليوم
+STRATEGY2_LEVERAGE = 2.0     # رافعة مالية × 2
 
-# ─── Timing ───────────────────────────────────────────────────────────────
-LOOP_INTERVAL_SECONDS = 30
-TIMEZONE              = "America/New_York"   # pytz handles EST/EDT automatically
-MARKET_OPEN_TIME      = "09:35"
-MARKET_CLOSE_TIME     = "15:45"
+# ─────────────────────────────────────────
+# 4. اختيار الأسهم (Universe)
+# ─────────────────────────────────────────
+UNIVERSE_SIZE           = 50        # عدد الأسهم في القائمة اليومية
+UNIVERSE_MAX_CANDIDATES = 500       # أقصى عدد مرشح يتم فحصه
+MIN_AVG_VOLUME          = 500_000   # أقل حجم تداول يومي مقبول
+MIN_PRICE               = 10.0      # أقل سعر للسهم مقبول
+MAX_PRICE               = 500.0     # أعلى سعر للسهم مقبول
 
-# ─── Risk & Position Sizing ───────────────────────────────────────────────
-MAX_LONG            = 2
-MAX_SHORT           = 1
-MAX_TOTAL           = 3
-RISK_PER_TRADE_PCT  = 0.01
-MIN_POSITION_VALUE  = 500.0
-MAX_POSITION_VALUE  = 5_000.0
+# ─────────────────────────────────────────
+# 5. استراتيجية Mean Reversion
+# ─────────────────────────────────────────
+S2_RSI_PERIOD       = 14      # فترة حساب RSI
+S2_RSI_OVERSOLD     = 30      # RSI تحت 30 → تشبع بيعي — شرط LONG
+S2_RSI_HIGH_QUALITY = 25      # RSI تحت 25 → تشبع بيعي عالي الجودة
+S2_RSI_OVERBOUGHT   = 70      # RSI فوق 70 → تشبع شرائي — شرط SHORT
 
-# ─── Strategy Parameters ──────────────────────────────────────────────────
-RSI_OVERSOLD          = 30
-RSI_OVERBOUGHT        = 70
-VWAP_THRESHOLD_PCT    = 1.2 / 100
-ATR_MIN_PCT           = 0.7 / 100
-ATR_MAX_PCT           = 3.5 / 100
-EMA_SHORT             = 9
-EMA_LONG              = 21
-EMA_TREND             = 200
+S2_VWAP_MIN_DEV     = 0.012   # الحد الأدنى للابتعاد عن VWAP = 1.2%
+S2_ATR_MIN_PCT      = 0.007   # أدنى ATR مقبول (0.7%) — تجنب السوق الراكد
+S2_ATR_MAX_PCT      = 0.035   # أقصى ATR مقبول (3.5%) — تجنب التقلب الشديد
 
-PROFIT_FACTOR_CUT     = 0.20
-STOP_LOSS_ATR_MULT    = 1.5
-TAKE_PROFIT_ATR_MULT  = 3.0
+S2_TP1_R            = 1.0     # الهدف الأول = 1R  (خروج 50% من الكمية)
+S2_TP2_R            = 3.0     # الهدف الثاني = 3R (خروج 50% من الكمية)
+S2_STOP_ATR_MULT    = 1.5     # وقف الخسارة = 1.5 × ATR
+PROFIT_FACTOR_CUT   = 0.20    # قطع الصفقة إذا تراجعت 20% من القمة
 
-# ─── Liquidity Sweep ──────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# 6. المؤشرات الفنية
+# ─────────────────────────────────────────
+EMA_SHORT = 9     # المتوسط المتحرك الأسي السريع
+EMA_LONG  = 21    # المتوسط المتحرك الأسي البطيء
+EMA_TREND = 200   # المتوسط المتحرك للاتجاه الرئيسي
+
+# ─────────────────────────────────────────
+# 7. Liquidity Sweep
+# ─────────────────────────────────────────
 LIQUIDITY_SWEEP_ENABLED = True
+# LONG:  كسر قاع أمس ثم الإغلاق فوقه (امتصاص البيع)
+# SHORT: كسر قمة أمس ثم الإغلاق تحتها (امتصاص الشراء)
 
-# ─── SHORT Selling ────────────────────────────────────────────────────────
-SHORT_ENABLED      = IS_PAPER
-SHORT_EXCHANGES    = {"NASDAQ", "NYSE"}
-SHORT_RSI_MIN      = RSI_OVERBOUGHT   # RSI > 70
+# ─────────────────────────────────────────
+# 8. البيع على المكشوف (SHORT Selling)
+# ─────────────────────────────────────────
+SHORT_ENABLED   = IS_PAPER            # مفعّل في Paper Trading فقط تلقائياً
+SHORT_EXCHANGES = {"NASDAQ", "NYSE"}  # البورصات المسموح بها للشورت
+# شروط الدخول (الشرط الأول إلزامي + يكفي شرط واحد من الباقين):
+#   1. RSI > 70 (تشبع شرائي) — إلزامي دائماً
+#   2. السعر فوق VWAP (ممتد صعوداً) — أو
+#   3. السعر تحت EMA200 (اتجاه هابط رئيسي)
 
-# ─── Logging ──────────────────────────────────────────────────────────────
-LOG_LEVEL = "INFO"
-LOG_FILE  = "trading.log"
+# ─────────────────────────────────────────
+# 9. حدود المراكز المفتوحة
+# ─────────────────────────────────────────
+MAX_LONG  = 2   # أقصى عدد صفقات شراء في نفس الوقت
+MAX_SHORT = 1   # أقصى عدد صفقات بيع على المكشوف في نفس الوقت
+MAX_TOTAL = 3   # الإجمالي الأقصى (MAX_LONG + MAX_SHORT)
+
+# ─────────────────────────────────────────
+# 10. توقيت السوق (بتوقيت نيويورك)
+# ─────────────────────────────────────────
+TIMEZONE                = "America/New_York"  # pytz يتعامل مع EST/EDT تلقائياً
+MARKET_OPEN             = "09:35"             # نتجاهل أول 5 دقائق من الجلسة
+MARKET_CLOSE            = "15:45"             # نتوقف 15 دقيقة قبل الإغلاق
+PRE_MARKET_ALERT        = 30                  # تنبيه قبل الافتتاح بـ 30 دقيقة
+NO_OPPORTUNITY_INTERVAL = 60                  # تنبيه "لا توجد فرصة" كل 60 دقيقة
+
+# ─────────────────────────────────────────
+# 11. إعدادات البيانات
+# ─────────────────────────────────────────
+CANDLE_INTERVAL = "5Min"   # الفريم الزمني الرئيسي
+HISTORY_BARS    = 260      # عدد الشموع التاريخية اليومية للتحليل
