@@ -1,62 +1,105 @@
-"""
-notifier.py — Telegram notifications.
-"""
-import logging
+# =============================================================
+# notifier.py — كل رسائل Telegram في مكان واحد
+# =============================================================
+
 import requests
-import config
+from datetime import datetime
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TIMEZONE
 
-logger = logging.getLogger(__name__)
+import pytz
 
-BASE_URL = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}"
+TZ = pytz.timezone(TIMEZONE)
 
 
-def send(message: str) -> bool:
-    if not config.TELEGRAM_TOKEN or not config.TELEGRAM_CHAT_ID:
-        logger.debug("Telegram not configured, skipping notification")
+# ─────────────────────────────────────────
+# الدالة الأساسية للإرسال
+# ─────────────────────────────────────────
+
+def _send(message: str) -> bool:
+    """
+    ترسل رسالة نصية إلى Telegram.
+    تُرجع True إذا نجح الإرسال، False إذا فشل.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️  Telegram غير مُعدّ — تحقق من .env")
         return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "text":       message,
+        "parse_mode": "HTML",
+    }
     try:
-        r = requests.post(
-            f"{BASE_URL}/sendMessage",
-            json={"chat_id": config.TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        return r.status_code == 200
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
     except Exception as e:
-        logger.warning(f"Telegram send failed: {e}")
+        print(f"❌ خطأ في إرسال Telegram: {e}")
         return False
 
 
-def notify_entry(signal: dict, shares: int, equity: float):
-    side_emoji = "🟢" if signal["side"] == "long" else "🔴"
-    msg = (
-        f"{side_emoji} <b>ENTER {signal['side'].upper()}</b> — {signal['symbol']}\n"
-        f"Price: ${signal['price']:.2f} | Shares: {shares}\n"
-        f"RSI: {signal['rsi']:.1f} | ATR: {signal['atr']:.2f}\n"
-        f"Stop: ${signal['stop']:.2f} | Target: ${signal['target']:.2f}\n"
-        f"Confidence: {signal['confidence']:.0%} | Equity: ${equity:,.0f}"
+def _now() -> str:
+    """يُرجع الوقت الحالي بتوقيت نيويورك."""
+    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+
+
+# ─────────────────────────────────────────
+# 1. تنبيه ما قبل افتتاح السوق
+# ─────────────────────────────────────────
+
+def notify_pre_market(stocks: list[str]) -> bool:
+    """يُرسل قبل افتتاح السوق بـ 30 دقيقة."""
+    stocks_str = " | ".join(stocks) if stocks else "لم يتم الاختيار بعد"
+    message = (
+        f"🌅 <b>تنبيه ما قبل الافتتاح</b>\n"
+        f"🕐 {_now()}\n"
+        f"──────────────────\n"
+        f"📋 أسهم اليوم ({len(stocks)}):\n"
+        f"{stocks_str}\n"
+        f"──────────────────\n"
+        f"⏳ السوق يفتح بعد 30 دقيقة"
     )
-    send(msg)
+    return _send(message)
 
 
-def notify_exit(symbol: str, side: str, pnl: float, reason: str):
-    emoji = "✅" if pnl >= 0 else "❌"
-    msg = (
-        f"{emoji} <b>EXIT {side.upper()}</b> — {symbol}\n"
-        f"PnL: ${pnl:+.2f} | Reason: {reason}"
+# ─────────────────────────────────────────
+# 2. لا توجد فرصة
+# ─────────────────────────────────────────
+
+def notify_no_opportunity() -> bool:
+    """يُرسل كل ساعة عند عدم توفر أي فرصة."""
+    message = (
+        f"🔍 <b>لا توجد فرصة حالياً</b>\n"
+        f"🕐 {_now()}\n"
+        f"──────────────────\n"
+        f"النظام يعمل ويراقب السوق"
     )
-    send(msg)
+    return _send(message)
 
 
-def notify_error(error: str):
-    send(f"⚠️ <b>ERROR</b>\n{error}")
+# ─────────────────────────────────────────
+# 3. فتح صفقة
+# ─────────────────────────────────────────
 
+def notify_trade_open(
+    ticker:      str,
+    strategy:    str,
+    side:        str,
+    price:       float,
+    quantity:    int,
+    stop_loss:   float,
+    target:      float,
+    risk_amount: float,
+) -> bool:
+    """يُرسل إشعار فتح صفقة بكل التفاصيل."""
+    side_emoji = "🟢" if side == "BUY" else "🔴"
+    r_ratio = round((target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
 
-def notify_daily_summary(report: dict):
-    msg = (
-        f"📊 <b>Daily Summary</b>\n"
-        f"Trades: {report.get('total_trades', 0)}\n"
-        f"Wins: {report.get('wins', 0)} | Losses: {report.get('losses', 0)}\n"
-        f"Total PnL: ${report.get('total_pnl', 0):+.2f}\n"
-        f"Win Rate: {report.get('win_rate', 0):.0%}"
-    )
-    send(msg)
+    message = (
+        f"{side_emoji} <b>صفقة جديدة — {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        f"──────────────────\n"
+        f"📌 الاستراتيجية : {strategy}\n"
+        f"📊 الاتجاه       : {side}\n"
+        f"💲 سعر الدخول   : ${price:.2f}\n"
+        f"�
