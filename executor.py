@@ -61,14 +61,22 @@ class OpenTrade:
 # ─────────────────────────────────────────
 
 def get_account() -> dict:
-    """يجلب معلومات حساب Alpaca."""
+    """يجلب معلومات حساب Alpaca مع طباعة Debug."""
     try:
+        print(f"DEBUG URL: {ALPACA_BASE_URL}")
+        print(f"DEBUG KEY: {ALPACA_API_KEY[:8] if ALPACA_API_KEY else 'EMPTY'}")
+
         response = requests.get(
             f"{ALPACA_BASE_URL}/v2/account",
             headers=HEADERS,
             timeout=10,
         )
+
+        print(f"DEBUG STATUS: {response.status_code}")
+        print(f"DEBUG BODY: {response.text[:200]}")
+
         data = response.json()
+
         return {
             "balance":        float(data.get("equity", 0)),
             "buying_power":   float(data.get("buying_power", 0)),
@@ -76,6 +84,7 @@ def get_account() -> dict:
             "shorting_enabled": data.get("shorting_enabled", False),
             "status":         data.get("status", "unknown"),
         }
+
     except Exception as e:
         print(f"❌ خطأ في جلب معلومات الحساب: {e}")
         return {}
