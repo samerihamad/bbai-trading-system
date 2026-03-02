@@ -1,332 +1,178 @@
-# =============================================================
-# main.py — المحرك الرئيسي للنظام
-# يشغّل كل شيء تلقائياً 24/7 بدون تدخل
-# استراتيجية وحيدة: Mean Reversion
-# =============================================================
-
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+"""
+main.py — Main trading loop.
+No 'schedule' library — pure pytz time check every 30 seconds.
+Handles EST/EDT automatically.
+"""
+import logging
 import time
-import schedule
+from datetime import datetime
 import pytz
-from datetime import datetime, timedelta
 
-from config import (
-    TIMEZONE,
-    PRE_MARKET_ALERT,
-    NO_OPPORTUNITY_INTERVAL,
-    MARKET_OPEN,
-    MARKET_CLOSE,
+import config
+import universe
+import strategy_meanrev as strategy
+import selector
+import risk
+import executor
+import notifier
+import reporter
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from datetime import timedelta
+
+# ─── Logging Setup ───────────────────────────────────────────────────────────
+logging.basicConfig(
+    level   = getattr(logging, config.LOG_LEVEL),
+    format  = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(config.LOG_FILE),
+    ]
 )
-from universe    import get_daily_universe
-from selector    import run_selector
-from executor    import (
-    get_account,
-    is_market_open,
-    get_next_market_open,
-    open_meanrev_trade,
-    monitor_trade,
-    place_market_sell,
-    close_all_positions,
-    OpenTrade,
-)
-from strategy_meanrev import refresh_allowed_tickers
-from risk        import DailyRiskManager
-from reporter    import record_trade, send_daily_report
-from notifier    import (
-    notify_pre_market,
-    notify_no_opportunity,
-    notify_trade_open,
-    notify_trade_win,
-    notify_trade_loss,
-    notify_stop_updated,
-    notify_system_stopped,
-)
+logger = logging.getLogger("main")
 
-TZ = pytz.timezone(TIMEZONE)
+data_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY)
 
-# ─────────────────────────────────────────
-# الحالة العامة للنظام
-# ─────────────────────────────────────────
-
-risk_manager : DailyRiskManager = DailyRiskManager()
-open_trades  : list[OpenTrade]  = []
-daily_stocks : dict             = {}  # {ticker: ema_above}
-last_no_opp  : datetime         = datetime.now(TZ) - timedelta(hours=2)
+NY_TZ = pytz.timezone(config.TIMEZONE)
 
 
-def log(msg: str):
-    """طباعة مع الوقت."""
-    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}]  {msg}")
+def ny_now() -> datetime:
+    """Current New York time — pytz handles EST/EDT transition automatically."""
+    return datetime.now(NY_TZ)
 
 
-# ─────────────────────────────────────────
-# 1. روتين ما قبل الافتتاح (9:00 AM)
-# ─────────────────────────────────────────
-
-def pre_market_routine():
-    global daily_stocks, risk_manager
-
-    log("🌅 بدء روتين ما قبل الافتتاح...")
-    risk_manager.reset()
-    log("✅ تم إعادة ضبط مدير المخاطرة")
-
-    daily_stocks = get_daily_universe()
-
-    # ⑥ تحديث فلترة الأسهم الديناميكية بناءً على آخر 30 يوم
-    refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
-    log("✅ تم تحديث فلترة الأسهم الديناميكية")
-
-    if daily_stocks:
-        notify_pre_market(list(daily_stocks.keys()))
-        log(f"✅ تم اختيار {len(daily_stocks)} سهم وإرسال التنبيه")  # type: ignore
-    else:
-        log("⚠️ لم يتم اختيار أي أسهم اليوم")
+def is_market_open() -> bool:
+    now = ny_now()
+    if now.weekday() >= 5:   # Saturday / Sunday
+        return False
+    t = now.strftime("%H:%M")
+    return config.MARKET_OPEN_TIME <= t <= config.MARKET_CLOSE_TIME
 
 
-# ─────────────────────────────────────────
-# 2. روتين الفحص (كل 5 دقائق)
-# ─────────────────────────────────────────
-
-def scan_routine():
-    global open_trades, last_no_opp
-
-    if not is_market_open():
-        log("💤 السوق مغلق — في انتظار الافتتاح")
-        return
-
-    if not risk_manager.can_trade():
-        log("⛔️ النظام متوقف — تم الوصول لحد الخسارتين")
-        return
-
-    if not daily_stocks:
-        log("⚠️ لا توجد أسهم مختارة")
-        return
-
-    log(f"🔍 بدء فحص {len(daily_stocks)} سهم...")
-
-    _monitor_open_trades()
-    _scan_for_signals()
+def is_near_close() -> bool:
+    t = ny_now().strftime("%H:%M")
+    return t >= config.MARKET_CLOSE_TIME
 
 
-def _monitor_open_trades():
-    global open_trades
+def fetch_bars(symbol: str, bars: int = 260) -> any:
+    end   = datetime.utcnow()
+    start = end - timedelta(days=bars + 30)
+    try:
+        req  = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                                start=start, end=end, limit=bars)
+        df   = data_client.get_stock_bars(req).df
+        return df.xs(symbol, level="symbol") if not df.empty else None
+    except Exception as e:
+        logger.warning(f"fetch_bars failed for {symbol}: {e}")
+        return None
 
-    if not open_trades:
-        return
 
-    log(f"👁  مراقبة {len(open_trades)} صفقة مفتوحة...")
-    trades_to_remove = []
+def run_once(universe_cache: list, positions: dict, account: dict):
+    """Single iteration of the trading logic."""
 
-    for trade in open_trades:
-        result = monitor_trade(trade)
-        status = result["status"]
-        price  = result["price"]
-        r      = result["r"]
+    equity = account["equity"]
 
-        if status == "stopped":
-            exit_qty = result.get("exit_qty", trade.quantity)
-            log(f"🛑 {trade.ticker} — ضُرب وقف الخسارة عند ${price:.2f} | كمية: {exit_qty}")
-            place_market_sell(trade.ticker, exit_qty)
-            pnl = round((price - trade.entry_price) * exit_qty, 2)
-            record_trade(
-                ticker=trade.ticker, strategy=trade.strategy,
-                entry_price=trade.entry_price, exit_price=price,
-                quantity=exit_qty, stop_loss=trade.stop_loss,
-                target=trade.target, risk_amount=trade.risk_amount,
-                exit_reason="stopped", opened_at=trade.opened_at,
+    # ── Exit checks ────────────────────────────────────────────────────────
+    for sym, pos in list(positions.items()):
+        current_price = pos["current_price"]
+        pos = risk.update_peak(pos, current_price)
+
+        reason = risk.should_exit(pos, current_price)
+        if reason:
+            bars = fetch_bars(sym)
+            if bars is not None:
+                exit_price = float(bars["close"].iloc[-1])
+            else:
+                exit_price = current_price
+
+            pnl = reporter.record_trade(
+                symbol=sym, side=pos["side"],
+                entry=pos["entry_price"], exit_price=exit_price,
+                qty=int(pos["qty"]), reason=reason
             )
-            stopped = risk_manager.record_loss(pnl, r)
-            notify_trade_loss(
-                ticker=trade.ticker, entry_price=trade.entry_price,
-                exit_price=price, quantity=exit_qty,
-                loss=abs(pnl), daily_losses=risk_manager.daily_losses,
-            )
-            if stopped:
-                notify_system_stopped()
-                log("⛔️ النظام متوقف بعد خسارتين")
-            trades_to_remove.append(trade)
+            executor.exit_position(sym, int(pos["qty"]), pos["side"], reason)
+            notifier.notify_exit(sym, pos["side"], pnl, reason)
 
-        elif status == "tp1_hit":
-            # خروج جزئي 50% + نقل الوقف إلى نقطة التعادل
-            tp1_qty  = result.get("exit_qty", trade.quantity // 2)
-            new_stop = result["new_stop"]
-            log(f"🎯 {trade.ticker} — تحقق TP1 @ ${price:.2f} | R={r:.1f} | خروج {tp1_qty} سهم")
-            place_market_sell(trade.ticker, tp1_qty)
-            pnl_tp1 = round((price - trade.entry_price) * tp1_qty, 2)
-            record_trade(
-                ticker=trade.ticker, strategy=trade.strategy,
-                entry_price=trade.entry_price, exit_price=price,
-                quantity=tp1_qty, stop_loss=trade.stop_loss,
-                target=trade.target_tp1, risk_amount=trade.risk_amount / 2,
-                exit_reason="tp1", opened_at=trade.opened_at,
-            )
-            risk_manager.record_win(pnl_tp1, r)
-            notify_trade_win(
-                ticker=trade.ticker, entry_price=trade.entry_price,
-                exit_price=price, quantity=tp1_qty,
-                profit=pnl_tp1, r_achieved=r,
-            )
-            # تحديث الصفقة للجزء المتبقي
-            trade.tp1_hit   = True
-            trade.stop_loss = new_stop
-            log(f"🔄 {trade.ticker} — نقل الوقف إلى التعادل: ${new_stop:.2f}")
-            notify_stop_updated(
-                ticker=trade.ticker, old_stop=trade.stop_loss,
-                new_stop=new_stop, current_price=price,
-            )
+    # ── Entry signals ─────────────────────────────────────────────────────
+    signals = []
+    for asset in universe_cache:
+        bars = fetch_bars(asset["symbol"])
+        if bars is None or len(bars) < config.EMA_TREND + 10:
+            continue
+        sig = strategy.evaluate(bars, asset)
+        if sig:
+            signals.append(sig)
 
-        elif status == "target":
-            exit_qty = result.get("exit_qty", trade.quantity_remaining if trade.tp1_hit else trade.quantity)
-            tp_label = "TP2 🎯🎯" if trade.tp1_hit else "الهدف 🎯"
-            log(f"{tp_label} {trade.ticker} — @ ${price:.2f} | R={r:.1f} | خروج {exit_qty} سهم")
-            place_market_sell(trade.ticker, exit_qty)
-            pnl = round((price - trade.entry_price) * exit_qty, 2)
-            record_trade(
-                ticker=trade.ticker, strategy=trade.strategy,
-                entry_price=trade.entry_price, exit_price=price,
-                quantity=exit_qty, stop_loss=trade.stop_loss,
-                target=trade.target, risk_amount=trade.risk_amount,
-                exit_reason="target", opened_at=trade.opened_at,
-            )
-            risk_manager.record_win(pnl, r)
-            notify_trade_win(
-                ticker=trade.ticker, entry_price=trade.entry_price,
-                exit_price=price, quantity=exit_qty,
-                profit=pnl, r_achieved=r,
-            )
-            trades_to_remove.append(trade)
+    # Refresh positions after exits
+    positions = executor.get_open_positions()
+    selected  = selector.select_signals(signals, positions)
 
-        elif status == "trail_updated":
-            new_stop = result["new_stop"]
-            log(f"🔄 {trade.ticker} — تحديث الوقف: ${trade.stop_loss:.2f} → ${new_stop:.2f}")
-            notify_stop_updated(
-                ticker=trade.ticker, old_stop=trade.stop_loss,
-                new_stop=new_stop, current_price=price,
-            )
-            trade.stop_loss = new_stop
+    for sig in selected:
+        shares = risk.calculate_shares(sig, equity)
+        if shares <= 0:
+            continue
+        result = executor.enter_position(sig, shares)
+        if result:
+            notifier.notify_entry(sig, shares, equity)
 
-        else:
-            tp_status = f"TP1✅ → TP2 @ ${trade.target_tp2:.2f}" if trade.tp1_hit else f"TP1 @ ${trade.target_tp1:.2f}"
-            log(f"📊 {trade.ticker} — مفتوحة | ${price:.2f} | R={r:.2f} | {tp_status}")
-
-    for trade in trades_to_remove:
-        open_trades.remove(trade)
-
-
-def _scan_for_signals():
-    global open_trades, last_no_opp
-
-    # أقصى 3 صفقات مفتوحة في نفس الوقت
-    if len(open_trades) >= 3:
-        return
-
-    account = get_account()
-    if not account:
-        log("❌ فشل جلب معلومات الحساب")
-        return
-
-    balance  = account["balance"]
-    results  = run_selector(daily_stocks)
-    found_signal = False
-
-    available_slots = 3 - len(open_trades)
-    for signal in results["meanrev"][:available_slots]:
-        if not risk_manager.can_trade():
-            break
-        trade = open_meanrev_trade(signal, balance)
-        if trade:
-            open_trades.append(trade)
-            found_signal = True
-            notify_trade_open(
-                ticker=signal.ticker, strategy="الارتداد",
-                side="BUY", price=signal.entry_price,
-                quantity=trade.quantity, stop_loss=signal.stop_loss,
-                target=signal.target_tp2, risk_amount=trade.risk_amount,
-            )
-
-    if not found_signal:
-        now  = datetime.now(TZ)
-        diff = (now - last_no_opp).total_seconds() / 60
-        if diff >= NO_OPPORTUNITY_INTERVAL:
-            notify_no_opportunity()
-            last_no_opp = now
-            log("📭 لا توجد فرصة — تم إرسال الإشعار")
-
-
-# ─────────────────────────────────────────
-# 3. روتين إغلاق السوق (4:05 PM)
-# ─────────────────────────────────────────
-
-def market_close_routine():
-    log("🔔 إغلاق السوق — بدء روتين النهاية...")
-
-    if open_trades:
-        log(f"📤 إغلاق {len(open_trades)} صفقة مفتوحة...")
-        for trade in open_trades:
-            exit_qty = trade.quantity_remaining if trade.tp1_hit else trade.quantity
-            place_market_sell(trade.ticker, exit_qty)
-            record_trade(
-                ticker=trade.ticker, strategy=trade.strategy,
-                entry_price=trade.entry_price, exit_price=trade.entry_price,
-                quantity=exit_qty, stop_loss=trade.stop_loss,
-                target=trade.target, risk_amount=trade.risk_amount,
-                exit_reason="eod", opened_at=trade.opened_at,
-            )
-        close_all_positions()
-        open_trades.clear()
-
-    account = get_account()
-    balance = account.get("balance", 0)
-    send_daily_report(balance)
-    log("✅ تم إرسال التقرير اليومي")
-
-
-# ─────────────────────────────────────────
-# 4. جدولة المهام
-# ─────────────────────────────────────────
-
-def setup_schedule():
-    for day in ["monday", "tuesday", "wednesday", "thursday", "friday"]:
-        getattr(schedule.every(), day).at("09:00").do(pre_market_routine)
-        getattr(schedule.every(), day).at("16:05").do(market_close_routine)
-
-    schedule.every(5).minutes.do(scan_routine)
-
-    log("✅ تم إعداد الجدول الزمني")
-    log("   09:00 AM — اختيار الأسهم + تحديث فلترة الأداء")
-    log("   كل 5 دقائق — فحص الأسهم ومراقبة الصفقات")
-    log("   04:05 PM — إغلاق الصفقات والتقرير اليومي")
-
-
-# ─────────────────────────────────────────
-# 5. نقطة البداية
-# ─────────────────────────────────────────
 
 def main():
-    log("=" * 55)
-    log("🚀 بدء تشغيل نظام التداول الآلي — Mean Reversion")
-    log("=" * 55)
+    logger.info("=== Trading System Started ===")
+    logger.info(f"Mode: {'PAPER' if config.IS_PAPER else 'LIVE'} | SHORT: {config.SHORT_ENABLED}")
 
-    account = get_account()
-    if not account:
-        log("❌ فشل الاتصال بـ Alpaca — تحقق من المفاتيح في .env")
-        return
+    universe_cache   = []
+    universe_refresh = 0   # epoch seconds of last refresh
+    UNIVERSE_TTL     = 3600  # refresh universe every hour
 
-    log(f"✅ متصل بـ Alpaca | الرصيد: ${account['balance']:,.2f}")
-    log(f"   وقت الافتتاح القادم: {get_next_market_open()}")
-
-    setup_schedule()
-
-    log("⏳ النظام يعمل — في انتظار المهام المجدولة...")
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        try:
+            now = time.time()
+
+            if not is_market_open():
+                logger.debug(f"Market closed at {ny_now().strftime('%H:%M %Z')}, sleeping...")
+                time.sleep(config.LOOP_INTERVAL_SECONDS)
+                continue
+
+            # Refresh universe periodically
+            if now - universe_refresh > UNIVERSE_TTL or not universe_cache:
+                logger.info("Refreshing universe...")
+                universe_cache   = universe.build_universe()
+                universe_refresh = now
+
+            # EOD: close all and send report
+            if is_near_close():
+                logger.info("Near market close — closing all positions")
+                executor.close_all_positions()
+                report = reporter.daily_report()
+                notifier.notify_daily_summary(report)
+                logger.info(f"Daily report: {report}")
+                # Sleep until next day
+                time.sleep(60 * 20)
+                continue
+
+            account   = executor.get_account()
+            positions = executor.get_open_positions()
+
+            logger.info(
+                f"[{ny_now().strftime('%H:%M %Z')}] "
+                f"Equity=${account['equity']:,.0f} | "
+                f"Positions={len(positions)} | "
+                f"Universe={len(universe_cache)}"
+            )
+
+            run_once(universe_cache, positions, account)
+
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested")
+            break
+        except Exception as e:
+            logger.error(f"Main loop error: {e}", exc_info=True)
+            notifier.notify_error(str(e))
+
+        time.sleep(config.LOOP_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
     main()
+```
