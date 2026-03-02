@@ -27,6 +27,8 @@ def calculate_position_size(
     - وقف الخسارة
     - نسبة المخاطرة 3% ديناميكية (Compounding)
 
+    يدعم LONG وSHORT — يستخدم abs() لحساب المسافة.
+
     يُرجع dict يحتوي:
     - quantity    : عدد الأسهم
     - risk_amount : المبلغ المخاطر به بالدولار
@@ -36,15 +38,13 @@ def calculate_position_size(
     if entry_price <= 0 or stop_loss <= 0:
         raise ValueError("سعر الدخول ووقف الخسارة يجب أن يكونا أكبر من صفر")
 
-    # LONG: وقف الخسارة يجب أن يكون أقل من سعر الدخول
-    # SHORT: نقبل وقف الخسارة أعلى من سعر الدخول
     risk_per_share = abs(entry_price - stop_loss)
     if risk_per_share == 0:
         raise ValueError("سعر الدخول ووقف الخسارة متساويان — لا يمكن حساب الحجم")
 
-    leverage     = STRATEGY2_LEVERAGE if use_leverage else 1.0
-    risk_amount  = balance * RISK_PER_TRADE
-    quantity     = int((risk_amount * leverage) / risk_per_share)
+    leverage    = STRATEGY2_LEVERAGE if use_leverage else 1.0
+    risk_amount = balance * RISK_PER_TRADE
+    quantity    = int((risk_amount * leverage) / risk_per_share)
 
     if quantity <= 0:
         quantity = 1  # على الأقل سهم واحد
@@ -87,10 +87,10 @@ def calculate_r(
 # ─────────────────────────────────────────
 
 def check_profit_factor_cut(
-    entry_price:  float,
-    peak_price:   float,
+    entry_price:   float,
+    peak_price:    float,
     current_price: float,
-    side:         str = "long",
+    side:          str = "long",
 ) -> bool:
     """
     يتحقق إذا كانت الصفقة تراجعت 20% من قمتها → يجب الخروج.
