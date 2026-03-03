@@ -363,10 +363,14 @@ def main():
     log("بدء تشغيل نظام التداول الآلي -- Mean Reversion + SHORT")
     log("=" * 55)
 
+# محاولة الاتصال مع إعادة المحاولة
+while True:
     account = get_account()
-    if not account:
-        log("فشل الاتصال بـ Alpaca -- تحقق من المفاتيح في .env")
-        return
+    if account:
+        log(f"متصل بـ Alpaca | الرصيد: ${account['balance']:,.2f}")
+        break
+    log("فشل الاتصال بـ Alpaca -- إعادة المحاولة خلال 60 ثانية...")
+    time.sleep(60)
 
     log(f"متصل بـ Alpaca | الرصيد: ${account['balance']:,.2f}")
     log(f"وقت الافتتاح القادم: {get_next_market_open()}")
