@@ -256,25 +256,12 @@ def get_ema200_batch(symbols: list) -> dict:
 
 
 # ─────────────────────────────────────────
-# 5. Market Regime Detection
-# ─────────────────────────────────────────
-
-def is_bear_market(ema_map: dict, prices: dict) -> bool:
-    if not ema_map or not prices:
-        return False
-    below = sum(1 for s, e in ema_map.items() if s in prices and prices[s] < e)
-    ratio = below / max(len(ema_map), 1)
-    print(f"Below EMA200 ratio: {ratio:.0%}")
-    return ratio >= 0.40
-
-
-# ─────────────────────────────────────────
-# 6. Main Entry
+# Mean Reversion Optimized Universe
 # ─────────────────────────────────────────
 
 def get_daily_universe() -> dict:
 
-    print("🔍 Selecting daily universe...")
+    print("🔍 Selecting Mean Reversion universe...")
 
     assets = get_tradable_assets()
     if not assets:
@@ -282,43 +269,35 @@ def get_daily_universe() -> dict:
 
     df = get_volume_data(assets)
     if df.empty:
+        print("❌ No stocks passed volume filter")
         return {}
 
-    candidates   = df.head(UNIVERSE_SIZE * 4)
+    print(f"After volume filter: {len(df)}")
+
+    # نختار أعلى سيولة فقط
+    candidates = df.sort_values("avg_volume", ascending=False).head(UNIVERSE_SIZE)
+
     symbols_list = candidates["symbol"].tolist()
-    prices_map   = dict(zip(candidates["symbol"], candidates["last_price"]))
 
+    # نحسب EMA فقط كمعلومة — لا نفلتر بها
     ema_map = get_ema200_batch(symbols_list)
-    skip_ema = len(ema_map) == 0
-
-    bear = is_bear_market(ema_map, prices_map) if not skip_ema else False
 
     result = {}
 
     for _, row in candidates.iterrows():
-        if len(result) >= UNIVERSE_SIZE:
-            break
-
         symbol = row["symbol"]
         price  = row["last_price"]
-        ema200 = ema_map.get(symbol)
-
-        if ema200 is None and not skip_ema:
-            continue
-
-        ema_above = (price > ema200) if ema200 else True
-
-        if not ema_above and not bear and not skip_ema:
-            continue
+        ema200 = ema_map.get(symbol, 0.0)
 
         result[symbol] = {
-            "ema_above":      ema_above,
+            "ema_above":      price > ema200 if ema200 else True,
             "exchange":       row["exchange"],
             "easy_to_borrow": row["easy_to_borrow"],
             "last_price":     price,
             "avg_volume":     int(row["avg_volume"]),
-            "ema200":         ema200 or 0.0,
+            "ema200":         ema200,
         }
 
-    print(f"✅ Selected {len(result)} stocks")
+    print(f"✅ Selected {len(result)} stocks for Mean Reversion")
+
     return result
