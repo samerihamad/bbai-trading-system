@@ -36,6 +36,7 @@ HEADERS = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
 }
 
+
 # ─────────────────────────────────────────
 # نموذج إشارة التداول
 # ─────────────────────────────────────────
@@ -60,6 +61,7 @@ class MeanRevSignal:
     ema200:         float = 0.0
     signal_quality: str   = "standard"
     liquidity_sweep: bool = False
+
 
 # ─────────────────────────────────────────
 # 1. جلب البيانات
@@ -89,14 +91,8 @@ def fetch_bars(ticker: str, days: int = HISTORY_BARS) -> pd.DataFrame:
             return pd.DataFrame()
 
         df = pd.DataFrame(bars)
-        df = df.rename(columns={
-            "o": "open",
-            "h": "high",
-            "l": "low",
-            "c": "close",
-            "v": "volume",
-        })
-
+        df = df.rename(columns={"o": "open", "h": "high", "l": "low",
+                                 "c": "close", "v": "volume"})
         df["time"] = pd.to_datetime(df["t"])
         return df.sort_values("time").reset_index(drop=True)
 
@@ -104,13 +100,23 @@ def fetch_bars(ticker: str, days: int = HISTORY_BARS) -> pd.DataFrame:
         print(f"❌ خطأ في جلب بيانات {ticker}: {e}")
         return pd.DataFrame()
 
+
 # ─────────────────────────────────────────
-# بقية الدوال (_analyze_long و _analyze_short) تبقى كما هي عندك
+# 4. تحديث الوقف المتحرك (مهم — executor يعتمد عليه)
 # ─────────────────────────────────────────
+
+def update_trailing_stop(
+    current_price: float,
+    current_stop:  float,
+    trail_step:    float,
+) -> float:
+
+    new_stop = current_price - trail_step
+    return round(max(new_stop, current_stop), 4)
 
 
 # ─────────────────────────────────────────
-# 8. الدالة الرئيسية (التصحيح هنا فقط)
+# 8. الدالة الرئيسية — تم تصحيحها فقط
 # ─────────────────────────────────────────
 
 def analyze(
@@ -122,6 +128,7 @@ def analyze(
 
     df = fetch_bars(ticker)
 
+    # 👇 هذا هو التصحيح الوحيد
     MIN_REQUIRED_BARS = max(50, S2_RSI_PERIOD * 3)
 
     if df.empty or len(df) < MIN_REQUIRED_BARS:
@@ -137,6 +144,6 @@ def analyze(
     if long_signal.has_signal:
         return long_signal
 
-    # محاولة SHORT إذا لم تنجح LONG
+    # محاولة SHORT
     short_signal = _analyze_short(ticker, df, exchange, ema200)
     return short_signal
