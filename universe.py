@@ -38,21 +38,17 @@ RETRY_DELAY     = 1.5
 
 def _safe_get(url: str, params: dict) -> requests.Response | None:
     """
-    Request wrapper:
+    Production request wrapper:
     - Retry ×3
     - Exponential backoff
     - Feed fallback if 403
-    - Detailed debug logging
+    - Clean logging (no JSON spam)
     """
     attempt = 0
     original_params = params.copy()
 
     while attempt < MAX_RETRIES:
         try:
-            print(f"\n🔎 Attempt {attempt+1}/{MAX_RETRIES}")
-            print(f"URL: {url}")
-            print(f"Params: {params}")
-
             response = requests.get(
                 url,
                 headers=HEADERS,
@@ -60,12 +56,8 @@ def _safe_get(url: str, params: dict) -> requests.Response | None:
                 timeout=REQUEST_TIMEOUT,
             )
 
-            print(f"Status Code: {response.status_code}")
-            print(f"Response Preview: {response.text[:300]}")
-
-            # 403 → محاولة بدون feed
+            # fallback إذا 403 وكان فيه feed
             if response.status_code == 403 and "feed" in params:
-                print("⚠️  403 received — retrying without feed...")
                 params = original_params.copy()
                 params.pop("feed", None)
                 attempt += 1
@@ -76,12 +68,12 @@ def _safe_get(url: str, params: dict) -> requests.Response | None:
                 return response
 
         except Exception as e:
-            print(f"❌ Request exception: {e}")
+            print(f"Request error: {e}")
 
         attempt += 1
         time.sleep(RETRY_DELAY * attempt)
 
-    print(f"\n❌ Failed request after {MAX_RETRIES} attempts: {url}")
+    print(f"❌ Failed request after {MAX_RETRIES} attempts: {url}")
     return None
 
 
