@@ -379,19 +379,16 @@ def analyze(
     exchange:  str  = "NASDAQ",
     ema200:    float = 0.0,
 ) -> MeanRevSignal:
-    """
-    الدالة الوحيدة التي يستدعيها selector.py.
 
-    تُحلل السهم وتُرجع أفضل إشارة متاحة:
-    - تبدأ بـ LONG إذا RSI < 30
-    - تنتقل لـ SHORT إذا RSI > 70 والشروط متوفرة
-    - تُرجع has_signal=False إذا لا توجد فرصة
-    """
     df = fetch_bars(ticker)
 
-    if df.empty or len(df) < EMA_TREND + 10:
+    MIN_REQUIRED_BARS = max(50, S2_RSI_PERIOD * 3)
+
+    if df.empty or len(df) < MIN_REQUIRED_BARS:
         return MeanRevSignal(
-            ticker=ticker, side="long", has_signal=False,
+            ticker=ticker,
+            side="long",
+            has_signal=False,
             reason="بيانات غير كافية للتحليل",
         )
 
