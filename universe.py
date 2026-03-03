@@ -267,7 +267,7 @@ def get_daily_universe() -> dict:
     print(f"After volume filter: {len(df)}")
 
     # نختار أعلى سيولة فقط
-    candidates = df.sort_values("avg_volume", ascending=False).head(UNIVERSE_SIZE)
+    candidates = df.head(UNIVERSE_SIZE)
 
     symbols_list = candidates["symbol"].tolist()
 
