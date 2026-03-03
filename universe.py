@@ -145,11 +145,10 @@ def get_volume_data(assets: list) -> pd.DataFrame:
 
         response = _safe_get(
             f"{ALPACA_DATA_URL}/v2/stocks/snapshots",
-            {
-                "symbols":     ",".join(batch),
-                "feed":        "iex",
-                "adjustment":  "raw",
-            },
+                {
+                    "symbols": ",".join(batch),
+                    "feed": "iex",
+                }
         )
 
         if not response:
