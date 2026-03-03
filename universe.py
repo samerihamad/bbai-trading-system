@@ -42,18 +42,26 @@ def _safe_get(url: str, params: dict) -> requests.Response | None:
     - Retry ×3
     - Exponential backoff
     - Feed fallback if 403
+    - Detailed debug logging
     """
     attempt = 0
     original_params = params.copy()
 
     while attempt < MAX_RETRIES:
         try:
+            print(f"\n🔎 Attempt {attempt+1}/{MAX_RETRIES}")
+            print(f"URL: {url}")
+            print(f"Params: {params}")
+
             response = requests.get(
                 url,
                 headers=HEADERS,
                 params=params,
                 timeout=REQUEST_TIMEOUT,
             )
+
+            print(f"Status Code: {response.status_code}")
+            print(f"Response Preview: {response.text[:300]}")
 
             # 403 → محاولة بدون feed
             if response.status_code == 403 and "feed" in params:
@@ -68,12 +76,12 @@ def _safe_get(url: str, params: dict) -> requests.Response | None:
                 return response
 
         except Exception as e:
-            print(f"Request error: {e}")
+            print(f"❌ Request exception: {e}")
 
         attempt += 1
         time.sleep(RETRY_DELAY * attempt)
 
-    print(f"❌ Failed request after {MAX_RETRIES} attempts: {url}")
+    print(f"\n❌ Failed request after {MAX_RETRIES} attempts: {url}")
     return None
 
 
