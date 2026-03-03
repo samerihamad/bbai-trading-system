@@ -1,12 +1,13 @@
 # =============================================================
-# universe.py — اختيار أفضل الأسهم ديناميكياً كل يوم
-# يفحص حتى 500 مرشح، يحسب EMA200 بـ batch واحد
-# يستخدم Snapshots API لجلب السيولة (متوافق مع IEX free tier)
+# universe.py — Production Grade
+# Robust Data Fetching + Retry + Feed Fallback + Rate Protection
 # =============================================================
 
 import requests
 import pandas as pd
+import time
 from datetime import datetime, timedelta
+from typing import Dict, List, Any
 
 from config import (
     ALPACA_API_KEY,
@@ -26,124 +27,165 @@ HEADERS = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
 }
 
+REQUEST_TIMEOUT = 20
+MAX_RETRIES     = 3
+RETRY_DELAY     = 1.5
 
-# -----------------------------------------
-# 1. جلب قائمة الأسهم
-# -----------------------------------------
 
-def get_tradable_assets() -> list:
-    all_assets = []
-    for exchange in ["NASDAQ", "NYSE"]:
+# ─────────────────────────────────────────
+# 1. Safe Request Wrapper
+# ─────────────────────────────────────────
+
+def _safe_get(url: str, params: dict) -> requests.Response | None:
+    """
+    Request wrapper:
+    - Retry ×3
+    - Exponential backoff
+    - Feed fallback if 403
+    """
+    attempt = 0
+    original_params = params.copy()
+
+    while attempt < MAX_RETRIES:
         try:
             response = requests.get(
-                f"{ALPACA_BASE_URL}/v2/assets",
+                url,
                 headers=HEADERS,
-                params={
-                    "status":      "active",
-                    "exchange":    exchange,
-                    "asset_class": "us_equity",
-                },
-                timeout=15,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
             )
-            assets = response.json()
-            for a in assets:
-                if (
-                    a.get("tradable")
-                    and a.get("status") == "active"
-                    and len(a["symbol"]) <= 5
-                    and "." not in a["symbol"]
-                    and "/" not in a["symbol"]
-                ):
-                    all_assets.append({
-                        "symbol":         a["symbol"],
-                        "exchange":       a["exchange"],
-                        "easy_to_borrow": a.get("easy_to_borrow", True),
-                    })
+
+            # 403 → محاولة بدون feed
+            if response.status_code == 403 and "feed" in params:
+                print("⚠️  403 received — retrying without feed...")
+                params = original_params.copy()
+                params.pop("feed", None)
+                attempt += 1
+                time.sleep(RETRY_DELAY)
+                continue
+
+            if response.status_code == 200:
+                return response
+
         except Exception as e:
-            print(f"Error fetching {exchange} assets: {e}")
+            print(f"Request error: {e}")
+
+        attempt += 1
+        time.sleep(RETRY_DELAY * attempt)
+
+    print(f"❌ Failed request after {MAX_RETRIES} attempts: {url}")
+    return None
+
+
+# ─────────────────────────────────────────
+# 2. Tradable Assets
+# ─────────────────────────────────────────
+
+def get_tradable_assets() -> List[Dict[str, Any]]:
+    all_assets = []
+
+    for exchange in ["NASDAQ", "NYSE"]:
+        response = _safe_get(
+            f"{ALPACA_BASE_URL}/v2/assets",
+            {
+                "status":      "active",
+                "exchange":    exchange,
+                "asset_class": "us_equity",
+            },
+        )
+
+        if not response:
+            continue
+
+        try:
+            assets = response.json()
+        except Exception:
+            continue
+
+        for a in assets:
+            if (
+                a.get("tradable")
+                and a.get("status") == "active"
+                and len(a["symbol"]) <= 5
+                and "." not in a["symbol"]
+                and "/" not in a["symbol"]
+            ):
+                all_assets.append({
+                    "symbol":         a["symbol"],
+                    "exchange":       a["exchange"],
+                    "easy_to_borrow": a.get("easy_to_borrow", True),
+                })
 
     all_assets = all_assets[:UNIVERSE_MAX_CANDIDATES]
-    print(f"   بعد الفلتر المبكر: {len(all_assets)} سهم")
+    print(f"Filtered assets: {len(all_assets)}")
     return all_assets
 
 
-# -----------------------------------------
-# 2. جلب بيانات السيولة والسعر عبر Snapshots
-# Snapshots يعمل مع IEX بدون اشتراك مدفوع
-# -----------------------------------------
+# ─────────────────────────────────────────
+# 3. Snapshots Liquidity Filter
+# ─────────────────────────────────────────
 
 def get_volume_data(assets: list) -> pd.DataFrame:
-    """
-    يستخدم /v2/stocks/snapshots بدلاً من /bars
-    لأن bars مع feed=iex يُرجع 403 في حسابات Paper Trading.
-    Snapshots تُرجع dailyBar و prevDailyBar و latestTrade
-    وهي كافية لحساب السيولة والسعر.
-    """
+
     tickers    = [a["symbol"] for a in assets]
     asset_map  = {a["symbol"]: a for a in assets}
     results    = []
-    batch_size = 100
+    batch_size = 200  # production optimized
 
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
+
+        response = _safe_get(
+            f"{ALPACA_DATA_URL}/v2/stocks/snapshots",
+            {
+                "symbols":     ",".join(batch),
+                "feed":        "iex",
+                "adjustment":  "raw",
+            },
+        )
+
+        if not response:
+            continue
+
         try:
-            response = requests.get(
-                f"{ALPACA_DATA_URL}/v2/stocks/snapshots",
-                headers=HEADERS,
-                params={
-                    "symbols": ",".join(batch),
-                    "feed":    "iex",
-                },
-                timeout=15,
-            )
-
-            # طباعة debug للـ batch الأول فقط
-            if i == 0:
-                print(f"   [DEBUG] snapshots status={response.status_code}")
-                if response.status_code != 200:
-                    print(f"   [DEBUG] error body: {response.text[:300]}")
-
-            if response.status_code != 200:
-                continue
-
             data = response.json()
+        except Exception:
+            continue
 
-            for symbol, snap in data.items():
-                try:
-                    # نحاول dailyBar أولاً ثم prevDailyBar ثم latestTrade
-                    daily = snap.get("dailyBar") or {}
-                    prev  = snap.get("prevDailyBar") or {}
-                    trade = snap.get("latestTrade") or {}
+        for symbol, snap in data.items():
+            try:
+                daily = snap.get("dailyBar") or {}
+                prev  = snap.get("prevDailyBar") or {}
+                trade = snap.get("latestTrade") or {}
 
-                    last_price = float(
-                        daily.get("c") or
-                        prev.get("c") or
-                        trade.get("p") or 0
-                    )
-                    volume = float(
-                        daily.get("v") or
-                        prev.get("v") or 0
-                    )
+                last_price = float(
+                    daily.get("c") or
+                    prev.get("c") or
+                    trade.get("p") or 0
+                )
 
-                    if not last_price or not volume:
-                        continue
+                volume = float(
+                    daily.get("v") or
+                    prev.get("v") or 0
+                )
 
-                    if volume >= MIN_AVG_VOLUME and MIN_PRICE <= last_price <= MAX_PRICE:
-                        info = asset_map.get(symbol, {})
-                        results.append({
-                            "symbol":         symbol,
-                            "exchange":       info.get("exchange", ""),
-                            "easy_to_borrow": info.get("easy_to_borrow", True),
-                            "avg_volume":     volume,
-                            "last_price":     last_price,
-                        })
-                except Exception:
+                if not last_price or not volume:
                     continue
 
-        except Exception as e:
-            print(f"   Batch {i // batch_size + 1} error: {e}")
+                if volume >= MIN_AVG_VOLUME and MIN_PRICE <= last_price <= MAX_PRICE:
+                    info = asset_map.get(symbol, {})
+                    results.append({
+                        "symbol":         symbol,
+                        "exchange":       info.get("exchange", ""),
+                        "easy_to_borrow": info.get("easy_to_borrow", True),
+                        "avg_volume":     volume,
+                        "last_price":     last_price,
+                    })
 
-    print(f"   [DEBUG] إجمالي الأسهم التي اجتازت الفلتر: {len(results)}")
+            except Exception:
+                continue
+
+        time.sleep(0.4)  # rate protection
 
     if not results:
         return pd.DataFrame()
@@ -152,15 +194,12 @@ def get_volume_data(assets: list) -> pd.DataFrame:
     return df.sort_values("avg_volume", ascending=False).reset_index(drop=True)
 
 
-# -----------------------------------------
-# 3. حساب EMA200 عبر Daily Bars
-# -----------------------------------------
+# ─────────────────────────────────────────
+# 4. EMA200 Batch Calculation
+# ─────────────────────────────────────────
 
 def get_ema200_batch(symbols: list) -> dict:
-    """
-    يجلب الشموع اليومية لحساب EMA200.
-    يستخدم iex feed مع تواريخ محددة.
-    """
+
     end   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     start = (datetime.utcnow() - timedelta(days=320)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -169,97 +208,86 @@ def get_ema200_batch(symbols: list) -> dict:
 
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i + batch_size]
-        try:
-            response = requests.get(
-                f"{ALPACA_DATA_URL}/v2/stocks/bars",
-                headers=HEADERS,
-                params={
-                    "symbols":   ",".join(batch),
-                    "timeframe": "1Day",
-                    "start":     start,
-                    "end":       end,
-                    "limit":     EMA_TREND + 10,
-                    "feed":      "iex",
-                },
-                timeout=20,
-            )
 
-            if response.status_code != 200:
-                if i == 0:
-                    print(f"   [DEBUG] EMA200 bars status={response.status_code}: {response.text[:200]}")
+        response = _safe_get(
+            f"{ALPACA_DATA_URL}/v2/stocks/bars",
+            {
+                "symbols":     ",".join(batch),
+                "timeframe":   "1Day",
+                "start":       start,
+                "end":         end,
+                "limit":       EMA_TREND + 10,
+                "feed":        "iex",
+                "adjustment":  "raw",
+            },
+        )
+
+        if not response:
+            continue
+
+        try:
+            data = response.json().get("bars", {})
+        except Exception:
+            continue
+
+        for symbol, bars in data.items():
+            if len(bars) < EMA_TREND:
                 continue
 
-            data = response.json().get("bars", {})
+            closes = [b["c"] for b in bars]
+            k      = 2 / (EMA_TREND + 1)
+            ema    = closes[0]
 
-            for symbol, bars in data.items():
-                if len(bars) < EMA_TREND:
-                    continue
-                closes = [b["c"] for b in bars]
-                k      = 2 / (EMA_TREND + 1)
-                ema    = closes[0]
-                for c in closes[1:]:
-                    ema = c * k + ema * (1 - k)
-                ema_map[symbol] = round(ema, 4)
+            for c in closes[1:]:
+                ema = c * k + ema * (1 - k)
 
-        except Exception as e:
-            print(f"   EMA200 batch {i // batch_size + 1} error: {e}")
+            ema_map[symbol] = round(ema, 4)
+
+        time.sleep(0.4)
 
     return ema_map
 
 
-# -----------------------------------------
-# 4. كشف السوق الهابط
-# -----------------------------------------
+# ─────────────────────────────────────────
+# 5. Market Regime Detection
+# ─────────────────────────────────────────
 
 def is_bear_market(ema_map: dict, prices: dict) -> bool:
     if not ema_map or not prices:
         return False
-    below = sum(1 for sym, ema in ema_map.items() if sym in prices and prices[sym] < ema)
+    below = sum(1 for s, e in ema_map.items() if s in prices and prices[s] < e)
     ratio = below / max(len(ema_map), 1)
-    print(f"   نسبة الأسهم تحت EMA200: {ratio:.0%}")
+    print(f"Below EMA200 ratio: {ratio:.0%}")
     return ratio >= 0.40
 
 
-# -----------------------------------------
-# 5. الدالة الرئيسية
-# -----------------------------------------
+# ─────────────────────────────────────────
+# 6. Main Entry
+# ─────────────────────────────────────────
 
 def get_daily_universe() -> dict:
-    print("\n🔍 جاري اختيار أسهم اليوم...")
-    print("─" * 55)
 
-    # الخطوة 1: جلب الأسهم
+    print("🔍 Selecting daily universe...")
+
     assets = get_tradable_assets()
     if not assets:
-        print("فشل جلب قائمة الأسهم")
         return {}
 
-    # الخطوة 2: فلترة السيولة عبر Snapshots
     df = get_volume_data(assets)
     if df.empty:
-        print("لا توجد أسهم تجتاز شروط السيولة والسعر")
         return {}
 
     candidates   = df.head(UNIVERSE_SIZE * 4)
     symbols_list = candidates["symbol"].tolist()
     prices_map   = dict(zip(candidates["symbol"], candidates["last_price"]))
-    print(f"   مرشحون للفلترة النهائية: {len(symbols_list)} سهم")
 
-    # الخطوة 3: EMA200
-    print("📈 حساب EMA200...")
     ema_map = get_ema200_batch(symbols_list)
-    print(f"   تم حساب EMA200 لـ {len(ema_map)} سهم")
-
-    # إذا فشل EMA200 نكمل بدونه (نقبل كل الأسهم)
     skip_ema = len(ema_map) == 0
-    if skip_ema:
-        print("   ⚠️  فشل جلب EMA200 — سيتم قبول الأسهم بدون شرط EMA")
 
-    # الخطوة 4: كشف السوق الهابط
     bear = is_bear_market(ema_map, prices_map) if not skip_ema else False
 
-    # الخطوة 5: بناء القائمة النهائية
     result = {}
+
     for _, row in candidates.iterrows():
         if len(result) >= UNIVERSE_SIZE:
             break
@@ -285,6 +313,5 @@ def get_daily_universe() -> dict:
             "ema200":         ema200 or 0.0,
         }
 
-    print("─" * 55)
-    print(f"✅ تم اختيار {len(result)} سهم لليوم | {'هابط ⚠️' if bear else 'صاعد 📈'}")
+    print(f"✅ Selected {len(result)} stocks")
     return result
