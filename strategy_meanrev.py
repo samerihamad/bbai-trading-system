@@ -128,7 +128,6 @@ def analyze(
 
     df = fetch_bars(ticker)
 
-    # 👇 هذا هو التصحيح الوحيد
     MIN_REQUIRED_BARS = max(50, S2_RSI_PERIOD * 3)
 
     if df.empty or len(df) < MIN_REQUIRED_BARS:
@@ -144,6 +143,6 @@ def analyze(
     if long_signal.has_signal:
         return long_signal
 
-    # محاولة SHORT
+    # محاولة SHORT إذا لم تنجح LONG
     short_signal = _analyze_short(ticker, df, exchange, ema200)
     return short_signal
