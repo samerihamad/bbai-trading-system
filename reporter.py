@@ -243,4 +243,14 @@ def send_daily_report(balance: float) -> bool:
 
 # ─────────────────────────────────────────
 # 5. تقرير الأداء الأسبوعي
-# ──────────────────────────
+# ─────────────────────────────────────────
+
+def get_weekly_stats() -> dict:
+    """يحسب إحصائيات آخر 5 أيام تداول."""
+    all_trades = []
+    for i in range(5):
+        day = (date.today() - timedelta(days=i)).isoformat()
+        all_trades.extend(load_trades_by_date(day))
+    stats = calculate_daily_stats(all_trades)
+    stats["period"] = "آخر 5 أيام تداول"
+    return stats
