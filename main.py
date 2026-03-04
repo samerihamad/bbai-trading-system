@@ -314,13 +314,14 @@ def scan_for_signals():
 
         current_positions = {t.ticker: t.side for t in open_trades}
         balance           = account["balance"]
+        buying_power      = account.get("buying_power", 0)
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
 
         for signal in results.get("meanrev", []):
             if not risk_manager.can_trade():
                 break
-            trade = open_meanrev_trade(signal, balance)
+            trade = open_meanrev_trade(signal, balance, buying_power=buying_power)
             if trade:
                 open_trades.append(trade)
                 found_signal = True
