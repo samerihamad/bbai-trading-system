@@ -29,6 +29,7 @@ from executor         import (
     monitor_trade,
     place_market_sell,
     close_all_positions,
+    get_open_positions,
     OpenTrade,
 )
 from strategy_meanrev import refresh_allowed_tickers
@@ -314,14 +315,13 @@ def scan_for_signals():
 
         current_positions = {t.ticker: t.side for t in open_trades}
         balance           = account["balance"]
-        buying_power      = account.get("buying_power", 0)
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
 
         for signal in results.get("meanrev", []):
             if not risk_manager.can_trade():
                 break
-            trade = open_meanrev_trade(signal, balance, buying_power=buying_power)
+            trade = open_meanrev_trade(signal, balance)
             if trade:
                 open_trades.append(trade)
                 found_signal = True
@@ -428,6 +428,14 @@ def main():
         except Exception as e:
             log(f"Connection error: {e} -- retrying in 60s...")
         time.sleep(60)
+
+    # ── استعادة المراكز المفتوحة من Alpaca عند بدء التشغيل
+    log("Checking for open positions in Alpaca...")
+    recovered = get_open_positions()
+    if recovered:
+        open_trades.extend(recovered)
+        log(f"Recovered {len(recovered)} open position(s) — will monitor them")
+    log("-" * 55)
 
     # بدء الاستماع لأوامر Telegram في الخلفية
     start_command_listener(get_system_context)
