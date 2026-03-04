@@ -13,9 +13,21 @@ from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
     ALPACA_BASE_URL,
+    ALPACA_DATA_URL,
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
 from risk import calculate_position_size, calculate_r
+from notifier import notify_short_not_allowed
+
+# ── alpaca-py: تُستخدم فقط لأوامر SHORT وجلب الأسعار
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+    _ALPACA_PY_AVAILABLE = True
+except ImportError:
+    _ALPACA_PY_AVAILABLE = False
+    print("⚠️  alpaca-py غير مثبتة — أوامر SHORT معطّلة")
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
@@ -60,7 +72,62 @@ class OpenTrade:
 # 1. جلب معلومات الحساب
 # ─────────────────────────────────────────
 
-def get_open_positions() -> list[OpenTrade]:
+def _get_alpaca_client() -> Optional["TradingClient"]:
+    """يُنشئ TradingClient من alpaca-py."""
+    if not _ALPACA_PY_AVAILABLE:
+        return None
+    try:
+        return TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+    except Exception as e:
+        print(f"❌ خطأ في إنشاء Alpaca client: {e}")
+        return None
+
+
+def _place_short_order_alpaca_py(
+    ticker:      str,
+    quantity:    int,
+    entry_price: float,
+    stop_loss:   float,
+    target:      float,
+) -> Optional[str]:
+    """يُنفّذ أمر SHORT عبر alpaca-py الرسمية."""
+    client = _get_alpaca_client()
+    if not client:
+        return None
+
+    limit_price = round(entry_price * 0.999, 2)
+
+    try:
+        order_data = LimitOrderRequest(
+            symbol=ticker,
+            qty=quantity,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=limit_price,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=round(target, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+        )
+        order    = client.submit_order(order_data=order_data)
+        order_id = str(order.id)
+        print(f"✅ أمر SHORT {ticker} تم عبر alpaca-py — ID: {order_id[:8]}...")
+        return order_id
+
+    except Exception as e:
+        err_msg = str(e)
+        print(f"❌ فشل SHORT {ticker}: {err_msg}")
+        if "not allowed to short" in err_msg.lower() or "forbidden" in err_msg.lower():
+            try:
+                notify_short_not_allowed(
+                    ticker=ticker,
+                    reason="الحساب لا يدعم Short Selling — تأكد أن الرصيد فوق $2,000",
+                )
+            except Exception:
+                pass
+        return None
+
+
+def get_open_positions() -> list:
     """
     يجلب المراكز المفتوحة من Alpaca ويحوّلها إلى قائمة OpenTrade.
     يُستدعى عند بدء التشغيل لتجنب فتح صفقات مكررة.
@@ -84,20 +151,18 @@ def get_open_positions() -> list[OpenTrade]:
             side     = "long" if side_raw == "long" else "short"
             qty      = abs(int(float(pos.get("qty", 1))))
             entry    = float(pos.get("avg_entry_price", 0))
-            market   = float(pos.get("market_value", 0))
 
             if not symbol or entry <= 0:
                 continue
 
-            # قيم افتراضية للمستويات — سيتم تحديثها عند أول دورة مراقبة
             if side == "long":
-                stop   = round(entry * 0.95, 2)   # 5% تحت الدخول
-                tp1    = round(entry * 1.02, 2)
-                tp2    = round(entry * 1.04, 2)
+                stop = round(entry * 0.95, 2)
+                tp1  = round(entry * 1.02, 2)
+                tp2  = round(entry * 1.04, 2)
             else:
-                stop   = round(entry * 1.05, 2)   # 5% فوق الدخول
-                tp1    = round(entry * 0.98, 2)
-                tp2    = round(entry * 0.96, 2)
+                stop = round(entry * 1.05, 2)
+                tp1  = round(entry * 0.98, 2)
+                tp2  = round(entry * 0.96, 2)
 
             trade = OpenTrade(
                 ticker=symbol,
@@ -157,20 +222,48 @@ def get_account() -> dict:
 
 
 def get_current_price(ticker: str) -> float:
-    """يجلب آخر سعر للسهم (متوسط bid/ask)."""
+    """
+    يجلب آخر سعر للسهم.
+    يستخدم snapshot API كمصدر موثوق.
+    """
+    # ── المحاولة الأولى: alpaca-py
+    if _ALPACA_PY_AVAILABLE:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockLatestQuoteRequest
+            data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            request     = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            quote       = data_client.get_stock_latest_quote(request)
+            q           = quote[ticker]
+            bid         = float(q.bid_price or 0)
+            ask         = float(q.ask_price or 0)
+            if bid and ask:
+                return round((bid + ask) / 2, 2)
+        except Exception:
+            pass
+
+    # ── المحاولة الثانية: snapshot API
     try:
         response = requests.get(
-            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
             headers=HEADERS,
+            params={"feed": "iex"},
             timeout=10,
         )
-        quote = response.json().get("quote", {})
-        bid   = float(quote.get("bp", 0))
-        ask   = float(quote.get("ap", 0))
-        return round((bid + ask) / 2, 2) if bid and ask else 0.0
+        if response.status_code == 200:
+            data         = response.json()
+            latest_trade = data.get("latestTrade", {})
+            daily_bar    = data.get("dailyBar", {})
+            price = float(
+                latest_trade.get("p") or
+                daily_bar.get("c") or 0
+            )
+            if price > 0:
+                return round(price, 2)
     except Exception as e:
         print(f"❌ خطأ في جلب سعر {ticker}: {e}")
-        return 0.0
+
+    return 0.0
 
 
 # ─────────────────────────────────────────
