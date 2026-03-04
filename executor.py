@@ -85,47 +85,20 @@ def get_account() -> dict:
 
 
 def get_current_price(ticker: str) -> float:
-    """
-    يجلب آخر سعر للسهم.
-    يستخدم alpaca-py أولاً، وإذا فشل يجرب snapshot API كبديل.
-    """
-    # ── المحاولة الأولى: alpaca-py
-    if _ALPACA_PY_AVAILABLE:
-        try:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockLatestQuoteRequest
-            data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-            request     = StockLatestQuoteRequest(symbol_or_symbols=ticker)
-            quote       = data_client.get_stock_latest_quote(request)
-            q           = quote[ticker]
-            bid         = float(q.bid_price or 0)
-            ask         = float(q.ask_price or 0)
-            if bid and ask:
-                return round((bid + ask) / 2, 2)
-        except Exception as e:
-            print(f"⚠️  alpaca-py quote فشل لـ {ticker}: {e}")
-
-    # ── المحاولة الثانية: snapshot API كبديل
+    """يجلب آخر سعر للسهم (متوسط bid/ask)."""
     try:
         response = requests.get(
-            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
+            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
             headers=HEADERS,
-            params={"feed": "iex"},
             timeout=10,
         )
-        data        = response.json()
-        latest_trade = data.get("latestTrade", {})
-        daily_bar    = data.get("dailyBar", {})
-        price = float(
-            latest_trade.get("p") or
-            daily_bar.get("c") or 0
-        )
-        if price > 0:
-            return round(price, 2)
+        quote = response.json().get("quote", {})
+        bid   = float(quote.get("bp", 0))
+        ask   = float(quote.get("ap", 0))
+        return round((bid + ask) / 2, 2) if bid and ask else 0.0
     except Exception as e:
         print(f"❌ خطأ في جلب سعر {ticker}: {e}")
-
-    return 0.0
+        return 0.0
 
 
 # ─────────────────────────────────────────
@@ -284,19 +257,22 @@ def cancel_order(order_id: str) -> bool:
 def open_meanrev_trade(
     signal:  MeanRevSignal,
     balance: float,
+    buying_power: float = 0.0,
 ) -> Optional[OpenTrade]:
     """
     يفتح صفقة LONG أو SHORT مع خروج مزدوج TP1/TP2.
     - TP1 عند 1R: يخرج 50% من الكمية + ينقل الوقف إلى التعادل
-    - TP2 عند 3R: يخرج الـ 50% المتبقية
+    - TP2 عند 2R: يخرج الـ 50% المتبقية
     - Trailing Stop يُفعَّل بعد TP1
     - رافعة مالية × 2
+    - SHORT يُنفَّذ عبر alpaca-py الرسمية
     """
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         use_leverage=True,
+        buying_power=buying_power,
     )
 
     total_qty = sizing["quantity"]
