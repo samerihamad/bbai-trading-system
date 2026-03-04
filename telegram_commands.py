@@ -31,9 +31,16 @@ MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 class SystemState:
     def __init__(self):
         # قراءة الـ flag عند البداية
-        # لو كان موجوداً من جلسة سابقة نتجاهله ونبدأ نظيف
-        self.maintenance_mode : bool = False
+        # لو كان موجوداً من جلسة سابقة → النظام يبقى في وضع الصيانة
+        self.maintenance_mode : bool = os.path.exists(MAINTENANCE_FLAG)
         self._last_update_id  : int  = 0
+
+        if self.maintenance_mode:
+            print(
+                f"⚠️  Maintenance flag detected -- System starting in MAINTENANCE MODE\n"
+                f"   Send /resume to start trading.",
+                flush=True,
+            )
 
     def enter_maintenance(self):
         """يُفعّل وضع الصيانة ويكتب الـ flag على الـ disk."""
