@@ -463,9 +463,12 @@ def main():
                     log("System paused -- daily loss limit reached")
                 elif not daily_stocks and not _pre_market_done:
                     # بدأ النظام أثناء ساعات التداول (deploy بعد 09:35)
-                    # نشغّل روتين ما قبل الافتتاح فوراً
-                    log("Started during market hours -- running pre-market now...")
-                    run_pre_market()
+                    # نشغّل روتين ما قبل الافتتاح فوراً — لكن ليس في وضع الصيانة
+                    if system_state.maintenance_mode:
+                        log("MAINTENANCE MODE -- pre-market skipped, waiting for /resume")
+                    else:
+                        log("Started during market hours -- running pre-market now...")
+                        run_pre_market()
                 elif daily_stocks:
                     monitor_open_trades()
                     scan_for_signals()
