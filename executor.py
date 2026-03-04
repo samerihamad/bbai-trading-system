@@ -17,7 +17,17 @@ from config import (
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
 from risk import calculate_position_size, calculate_r
-from notifier import _send as telegram_send
+from notifier import notify_short_not_allowed
+
+# ── alpaca-py: تُستخدم فقط لأوامر SHORT
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+    _ALPACA_PY_AVAILABLE = True
+except ImportError:
+    _ALPACA_PY_AVAILABLE = False
+    print("⚠️  alpaca-py غير مثبتة — أوامر SHORT ستستخدم requests كبديل")
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
@@ -103,6 +113,17 @@ def get_current_price(ticker: str) -> float:
         return 0.0
 
 
+def _get_alpaca_client() -> Optional["TradingClient"]:
+    """يُنشئ TradingClient من alpaca-py — يُستخدم لأوامر SHORT فقط."""
+    if not _ALPACA_PY_AVAILABLE:
+        return None
+    try:
+        return TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+    except Exception as e:
+        print(f"❌ خطأ في إنشاء Alpaca client: {e}")
+        return None
+
+
 # ─────────────────────────────────────────
 # 2. التحقق من السوق
 # ─────────────────────────────────────────
@@ -148,22 +169,30 @@ def place_bracket_order(
 ) -> Optional[str]:
     """
     يُنفّذ Bracket Order — أمر دخول مع وقف خسارة وهدف.
-    يدعم LONG (buy) وSHORT (sell).
+    - LONG  → requests مباشرة (الطريقة الأصلية)
+    - SHORT → alpaca-py الرسمية (تضمن التعرف الصحيح على Short)
     يُرجع order_id إذا نجح، None إذا فشل.
     """
-    order_side = "buy" if side == "long" else "sell"
 
-    # LONG:  limit_price أعلى قليلاً من السعر (نضمن التنفيذ)
-    # SHORT: limit_price أقل قليلاً من السعر
-    if side == "long":
-        limit_price = round(entry_price * 1.001, 2)
-    else:
-        limit_price = round(entry_price * 0.999, 2)
+    # ══════════════════════════════════════════
+    # SHORT: نستخدم alpaca-py الرسمية
+    # ══════════════════════════════════════════
+    if side == "short":
+        if _ALPACA_PY_AVAILABLE:
+            return _place_short_order_alpaca_py(ticker, quantity, entry_price, stop_loss, target)
+        else:
+            # fallback لـ requests إذا لم تكن المكتبة مثبتة
+            print("⚠️  alpaca-py غير متاحة — محاولة SHORT عبر requests")
+
+    # ══════════════════════════════════════════
+    # LONG: requests مباشرة (الطريقة الأصلية)
+    # ══════════════════════════════════════════
+    limit_price = round(entry_price * 1.001, 2)
 
     order = {
         "symbol":        ticker,
         "qty":           str(quantity),
-        "side":          order_side,
+        "side":          "buy",
         "type":          "limit",
         "limit_price":   str(limit_price),
         "time_in_force": "day",
@@ -187,8 +216,7 @@ def place_bracket_order(
 
         if response.status_code in (200, 201):
             order_id = data.get("id", "")
-            label    = "شراء" if side == "long" else "بيع على المكشوف"
-            print(f"✅ أمر {label} {ticker} تم — ID: {order_id[:8]}...")
+            print(f"✅ أمر شراء {ticker} تم — ID: {order_id[:8]}...")
             return order_id
         else:
             print(f"❌ فشل أمر {ticker}: {data.get('message', 'خطأ غير معروف')}")
@@ -196,6 +224,58 @@ def place_bracket_order(
 
     except Exception as e:
         print(f"❌ خطأ في تنفيذ أمر {ticker}: {e}")
+        return None
+
+
+def _place_short_order_alpaca_py(
+    ticker:      str,
+    quantity:    int,
+    entry_price: float,
+    stop_loss:   float,
+    target:      float,
+) -> Optional[str]:
+    """
+    يُنفّذ أمر SHORT عبر alpaca-py الرسمية.
+    يضمن التعرف الصحيح على البيع على المكشوف.
+    """
+    client = _get_alpaca_client()
+    if not client:
+        return None
+
+    # SHORT: limit أقل قليلاً من السعر لضمان التنفيذ
+    limit_price = round(entry_price * 0.999, 2)
+
+    try:
+        order_data = LimitOrderRequest(
+            symbol=ticker,
+            qty=quantity,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=limit_price,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=round(target, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
+        )
+
+        order = client.submit_order(order_data=order_data)
+        order_id = str(order.id)
+        print(f"✅ أمر SHORT {ticker} تم عبر alpaca-py — ID: {order_id[:8]}...")
+        return order_id
+
+    except Exception as e:
+        err_msg = str(e)
+        print(f"❌ فشل SHORT {ticker} عبر alpaca-py: {err_msg}")
+
+        # إذا كان الخطأ متعلقاً بصلاحيات الحساب
+        if "not allowed to short" in err_msg.lower() or "forbidden" in err_msg.lower():
+            try:
+                notify_short_not_allowed(
+                    ticker=ticker,
+                    reason="الحساب لا يدعم Short Selling — تأكد أن نوعه Margin في Alpaca",
+                )
+            except Exception:
+                pass
+
         return None
 
 
@@ -266,36 +346,8 @@ def open_meanrev_trade(
     - TP2 عند 3R: يخرج الـ 50% المتبقية
     - Trailing Stop يُفعَّل بعد TP1
     - رافعة مالية × 2
+    - SHORT يُنفَّذ عبر alpaca-py الرسمية
     """
-    # ── فحص صلاحية SHORT قبل المتابعة
-    if signal.side == "short":
-        account = get_account()
-        if not account.get("shorting_enabled", False):
-            msg = (
-                "⛔ <b>SHORT غير مسموح | Short Not Allowed</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"📌 السهم : {signal.ticker}\n"
-                f"💰 سعر الدخول : ${signal.entry_price:.2f}\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "❌ <b>السبب:</b> الحساب الحالي <b>Cash Account</b> لا يدعم البيع على المكشوف\n\n"
-                "✅ <b>الحل:</b> تواصل مع دعم Alpaca لتحويل الحساب إلى <b>Margin Account</b>\n"
-                "📧 support@alpaca.markets"
-            )
-            telegram_send(msg)
-            print(f"⛔ SHORT غير مسموح للحساب الحالي — تم إرسال تنبيه Telegram ({signal.ticker})")
-            return None
-    # ── فحص صلاحية SHORT قبل المتابعة
-    if signal.side == "short":
-        account = get_account()
-        if not account.get("shorting_enabled", False):
-            reason = "الحساب من نوع Cash — يجب تحويله إلى Margin لتفعيل Short Selling"
-            print(f"⛔ SHORT غير مسموح في هذا الحساب — {signal.ticker}")
-            print(f"   ℹ️  {reason}")
-            try:
-                notify_short_not_allowed(ticker=signal.ticker, reason=reason)
-            except Exception as e:
-                print(f"❌ خطأ في إرسال تنبيه Telegram: {e}")
-            return None
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
