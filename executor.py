@@ -85,20 +85,47 @@ def get_account() -> dict:
 
 
 def get_current_price(ticker: str) -> float:
-    """يجلب آخر سعر للسهم (متوسط bid/ask)."""
+    """
+    يجلب آخر سعر للسهم.
+    يستخدم alpaca-py أولاً، وإذا فشل يجرب snapshot API كبديل.
+    """
+    # ── المحاولة الأولى: alpaca-py
+    if _ALPACA_PY_AVAILABLE:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockLatestQuoteRequest
+            data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            request     = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            quote       = data_client.get_stock_latest_quote(request)
+            q           = quote[ticker]
+            bid         = float(q.bid_price or 0)
+            ask         = float(q.ask_price or 0)
+            if bid and ask:
+                return round((bid + ask) / 2, 2)
+        except Exception as e:
+            print(f"⚠️  alpaca-py quote فشل لـ {ticker}: {e}")
+
+    # ── المحاولة الثانية: snapshot API كبديل
     try:
         response = requests.get(
-            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
             headers=HEADERS,
+            params={"feed": "iex"},
             timeout=10,
         )
-        quote = response.json().get("quote", {})
-        bid   = float(quote.get("bp", 0))
-        ask   = float(quote.get("ap", 0))
-        return round((bid + ask) / 2, 2) if bid and ask else 0.0
+        data        = response.json()
+        latest_trade = data.get("latestTrade", {})
+        daily_bar    = data.get("dailyBar", {})
+        price = float(
+            latest_trade.get("p") or
+            daily_bar.get("c") or 0
+        )
+        if price > 0:
+            return round(price, 2)
     except Exception as e:
         print(f"❌ خطأ في جلب سعر {ticker}: {e}")
-        return 0.0
+
+    return 0.0
 
 
 # ─────────────────────────────────────────
@@ -382,20 +409,12 @@ def monitor_trade(trade: OpenTrade) -> dict:
         return {"status": "target", "price": current_price,
                 "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
 
-    # ── Trailing Stop (يُفعَّل بعد TP1 للـ LONG والـ SHORT)
-    if trade.tp1_hit and trade.trail_step > 0:
-        if trade.side == "long":
-            new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
-            if new_stop > trade.stop_loss:
-                return {"status": "trail_updated", "price": current_price,
-                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
-        elif trade.side == "short":
-            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
-            new_stop = current_price + trade.trail_step
-            new_stop = round(min(new_stop, trade.stop_loss), 4)
-            if new_stop < trade.stop_loss:
-                return {"status": "trail_updated", "price": current_price,
-                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+    # ── Trailing Stop (يُفعَّل بعد TP1 فقط للـ LONG)
+    if trade.side == "long" and trade.tp1_hit and trade.trail_step > 0:
+        new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
+        if new_stop > trade.stop_loss:
+            return {"status": "trail_updated", "price": current_price,
+                    "r": r_current, "new_stop": new_stop, "exit_qty": 0}
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
