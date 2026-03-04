@@ -30,15 +30,16 @@ MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 
 class SystemState:
     def __init__(self):
-        # قراءة الـ flag عند البداية
-        # لو كان موجوداً من جلسة سابقة → النظام يبقى في وضع الصيانة
-        self.maintenance_mode : bool = os.path.exists(MAINTENANCE_FLAG)
-        self._last_update_id  : int  = 0
+        # الأولوية: Environment Variable → MAINTENANCE_MODE=true في Render Dashboard
+        # إذا كانت true → النظام يبدأ في وضع الصيانة حتى ترسل /resume
+        env_val               = os.environ.get("MAINTENANCE_MODE", "false").strip().lower()
+        self.maintenance_mode = env_val == "true"
+        self._last_update_id  = 0
 
         if self.maintenance_mode:
             print(
-                f"⚠️  Maintenance flag detected -- System starting in MAINTENANCE MODE\n"
-                f"   Send /resume to start trading.",
+                "⚠️  MAINTENANCE_MODE=true — System starting PAUSED\n"
+                "   Send /resume via Telegram to start trading.",
                 flush=True,
             )
 
