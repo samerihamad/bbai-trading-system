@@ -60,6 +60,70 @@ class OpenTrade:
 # 1. جلب معلومات الحساب
 # ─────────────────────────────────────────
 
+def get_open_positions() -> list:
+    """
+    يجلب المراكز المفتوحة من Alpaca ويحوّلها إلى OpenTrade.
+    يُستدعى عند بدء التشغيل لتجنب فتح صفقات مكررة.
+    """
+    try:
+        response = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions",
+            headers=HEADERS,
+            timeout=10,
+        )
+        if response.status_code != 200:
+            print(f"⚠️  فشل جلب المراكز: {response.status_code}")
+            return []
+
+        positions = response.json()
+        trades    = []
+
+        for pos in positions:
+            symbol   = pos.get("symbol", "")
+            side_raw = pos.get("side", "long")
+            side     = "long" if side_raw == "long" else "short"
+            qty      = abs(int(float(pos.get("qty", 1))))
+            entry    = float(pos.get("avg_entry_price", 0))
+
+            if not symbol or entry <= 0:
+                continue
+
+            if side == "long":
+                stop = round(entry * 0.95, 2)
+                tp1  = round(entry * 1.02, 2)
+                tp2  = round(entry * 1.04, 2)
+            else:
+                stop = round(entry * 1.05, 2)
+                tp1  = round(entry * 0.98, 2)
+                tp2  = round(entry * 0.96, 2)
+
+            tp1_qty            = max(1, qty // 2)
+            quantity_remaining = qty - tp1_qty
+
+            trade = OpenTrade(
+                ticker=symbol, strategy="meanrev", side=side,
+                order_id="recovered", entry_price=entry,
+                stop_loss=stop, target=tp2,
+                target_tp1=tp1, target_tp2=tp2,
+                trail_stop=0.0, trail_step=0.0,
+                quantity=qty, quantity_remaining=quantity_remaining,
+                tp1_hit=False, peak_price=entry, risk_amount=0.0,
+            )
+            trades.append(trade)
+            print(f"  ♻️  استعادة: {symbol} [{side.upper()}] qty={qty} (TP1={tp1_qty} | TP2={quantity_remaining}) entry=${entry:.2f}")
+
+        if trades:
+            print(f"✅ تم استعادة {len(trades)} مركز مفتوح من Alpaca")
+        else:
+            print("ℹ️  لا توجد مراكز مفتوحة في Alpaca")
+
+        return trades
+
+    except Exception as e:
+        print(f"❌ خطأ في جلب المراكز المفتوحة: {e}")
+        return []
+
+
 def get_account() -> dict:
     """يجلب معلومات حساب Alpaca."""
     try:
