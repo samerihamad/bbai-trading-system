@@ -73,7 +73,6 @@ class OpenTrade:
 # ─────────────────────────────────────────
 
 def _get_alpaca_client() -> Optional["TradingClient"]:
-    """يُنشئ TradingClient من alpaca-py."""
     if not _ALPACA_PY_AVAILABLE:
         return None
     try:
@@ -84,27 +83,18 @@ def _get_alpaca_client() -> Optional["TradingClient"]:
 
 
 def _place_short_order_alpaca_py(
-    ticker:      str,
-    quantity:    int,
-    entry_price: float,
-    stop_loss:   float,
-    target:      float,
+    ticker: str, quantity: int, entry_price: float,
+    stop_loss: float, target: float,
 ) -> Optional[str]:
-    """يُنفّذ أمر SHORT عبر alpaca-py الرسمية."""
     client = _get_alpaca_client()
     if not client:
         return None
-
     limit_price = round(entry_price * 0.999, 2)
-
     try:
         order_data = LimitOrderRequest(
-            symbol=ticker,
-            qty=quantity,
-            side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            limit_price=limit_price,
-            order_class=OrderClass.BRACKET,
+            symbol=ticker, qty=quantity,
+            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+            limit_price=limit_price, order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=round(target, 2)),
             stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
         )
@@ -112,7 +102,6 @@ def _place_short_order_alpaca_py(
         order_id = str(order.id)
         print(f"✅ أمر SHORT {ticker} تم عبر alpaca-py — ID: {order_id[:8]}...")
         return order_id
-
     except Exception as e:
         err_msg = str(e)
         print(f"❌ فشل SHORT {ticker}: {err_msg}")
@@ -129,7 +118,7 @@ def _place_short_order_alpaca_py(
 
 def get_open_positions() -> list:
     """
-    يجلب المراكز المفتوحة من Alpaca ويحوّلها إلى قائمة OpenTrade.
+    يجلب المراكز المفتوحة من Alpaca ويحوّلها إلى OpenTrade.
     يُستدعى عند بدء التشغيل لتجنب فتح صفقات مكررة.
     """
     try:
@@ -139,7 +128,7 @@ def get_open_positions() -> list:
             timeout=10,
         )
         if response.status_code != 200:
-            print(f"⚠️  فشل جلب المراكز المفتوحة: {response.status_code}")
+            print(f"⚠️  فشل جلب المراكز: {response.status_code}")
             return []
 
         positions = response.json()
@@ -155,6 +144,7 @@ def get_open_positions() -> list:
             if not symbol or entry <= 0:
                 continue
 
+            # مستويات افتراضية
             if side == "long":
                 stop = round(entry * 0.95, 2)
                 tp1  = round(entry * 1.02, 2)
@@ -164,26 +154,21 @@ def get_open_positions() -> list:
                 tp1  = round(entry * 0.98, 2)
                 tp2  = round(entry * 0.96, 2)
 
+            # حساب الكميات بشكل صحيح
+            tp1_qty            = max(1, qty // 2)
+            quantity_remaining = qty - tp1_qty
+
             trade = OpenTrade(
-                ticker=symbol,
-                strategy="meanrev",
-                side=side,
-                order_id="recovered",
-                entry_price=entry,
-                stop_loss=stop,
-                target=tp2,
-                target_tp1=tp1,
-                target_tp2=tp2,
-                trail_stop=0.0,
-                trail_step=0.0,
-                quantity=qty,
-                quantity_remaining=qty,
-                tp1_hit=False,
-                peak_price=entry,
-                risk_amount=0.0,
+                ticker=symbol, strategy="meanrev", side=side,
+                order_id="recovered", entry_price=entry,
+                stop_loss=stop, target=tp2,
+                target_tp1=tp1, target_tp2=tp2,
+                trail_stop=0.0, trail_step=0.0,
+                quantity=qty, quantity_remaining=quantity_remaining,
+                tp1_hit=False, peak_price=entry, risk_amount=0.0,
             )
             trades.append(trade)
-            print(f"  ♻️  استعادة مركز: {symbol} [{side.upper()}] qty={qty} entry=${entry:.2f}")
+            print(f"  ♻️  استعادة: {symbol} [{side.upper()}] qty={qty} (TP1={tp1_qty} | TP2={quantity_remaining}) entry=${entry:.2f}")
 
         if trades:
             print(f"✅ تم استعادة {len(trades)} مركز مفتوح من Alpaca")
@@ -195,6 +180,44 @@ def get_open_positions() -> list:
     except Exception as e:
         print(f"❌ خطأ في جلب المراكز المفتوحة: {e}")
         return []
+
+
+def get_current_price(ticker: str) -> float:
+    """يجلب آخر سعر للسهم — alpaca-py أولاً ثم snapshot كبديل."""
+    if _ALPACA_PY_AVAILABLE:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockLatestQuoteRequest
+            data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            quote       = data_client.get_stock_latest_quote(
+                            StockLatestQuoteRequest(symbol_or_symbols=ticker))
+            q   = quote[ticker]
+            bid = float(q.bid_price or 0)
+            ask = float(q.ask_price or 0)
+            if bid and ask:
+                return round((bid + ask) / 2, 2)
+        except Exception:
+            pass
+
+    try:
+        response = requests.get(
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
+            headers=HEADERS,
+            params={"feed": "iex"},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data  = response.json()
+            price = float(
+                (data.get("latestTrade") or {}).get("p") or
+                (data.get("dailyBar")    or {}).get("c") or 0
+            )
+            if price > 0:
+                return round(price, 2)
+    except Exception as e:
+        print(f"❌ خطأ في جلب سعر {ticker}: {e}")
+
+    return 0.0
 
 
 def get_account() -> dict:
@@ -222,48 +245,20 @@ def get_account() -> dict:
 
 
 def get_current_price(ticker: str) -> float:
-    """
-    يجلب آخر سعر للسهم.
-    يستخدم snapshot API كمصدر موثوق.
-    """
-    # ── المحاولة الأولى: alpaca-py
-    if _ALPACA_PY_AVAILABLE:
-        try:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockLatestQuoteRequest
-            data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-            request     = StockLatestQuoteRequest(symbol_or_symbols=ticker)
-            quote       = data_client.get_stock_latest_quote(request)
-            q           = quote[ticker]
-            bid         = float(q.bid_price or 0)
-            ask         = float(q.ask_price or 0)
-            if bid and ask:
-                return round((bid + ask) / 2, 2)
-        except Exception:
-            pass
-
-    # ── المحاولة الثانية: snapshot API
+    """يجلب آخر سعر للسهم (متوسط bid/ask)."""
     try:
         response = requests.get(
-            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
+            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
             headers=HEADERS,
-            params={"feed": "iex"},
             timeout=10,
         )
-        if response.status_code == 200:
-            data         = response.json()
-            latest_trade = data.get("latestTrade", {})
-            daily_bar    = data.get("dailyBar", {})
-            price = float(
-                latest_trade.get("p") or
-                daily_bar.get("c") or 0
-            )
-            if price > 0:
-                return round(price, 2)
+        quote = response.json().get("quote", {})
+        bid   = float(quote.get("bp", 0))
+        ask   = float(quote.get("ap", 0))
+        return round((bid + ask) / 2, 2) if bid and ask else 0.0
     except Exception as e:
         print(f"❌ خطأ في جلب سعر {ticker}: {e}")
-
-    return 0.0
+        return 0.0
 
 
 # ─────────────────────────────────────────
@@ -532,7 +527,15 @@ def monitor_trade(trade: OpenTrade) -> dict:
         (trade.side == "short" and not trade.tp1_hit and current_price <= trade.target_tp1)
     )
     if tp1_hit:
-        tp1_qty  = trade.quantity - trade.quantity_remaining
+        # tp1_qty = نصف الكمية الكلية دائماً
+        # للمراكز الطبيعية:   quantity=100, quantity_remaining=50 → tp1_qty=50 ✅
+        # للمراكز المستعادة:  quantity=103, quantity_remaining=103 → tp1_qty=51 ✅
+        tp1_qty = trade.quantity - trade.quantity_remaining
+        if tp1_qty <= 0:
+            tp1_qty = max(1, trade.quantity // 2)
+            # تحديث quantity_remaining للكمية المتبقية بعد TP1
+            trade.quantity_remaining = trade.quantity - tp1_qty
+
         new_stop = trade.entry_price  # نقل الوقف إلى نقطة التعادل
         return {"status": "tp1_hit", "price": current_price,
                 "r": r_current, "new_stop": new_stop, "exit_qty": tp1_qty}
