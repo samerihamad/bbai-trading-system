@@ -15,10 +15,11 @@ from config import (
 # ─────────────────────────────────────────
 
 def calculate_position_size(
-    balance:      float,
-    entry_price:  float,
-    stop_loss:    float,
-    use_leverage: bool = False,
+    balance:       float,
+    entry_price:   float,
+    stop_loss:     float,
+    use_leverage:  bool = False,
+    buying_power:  float = 0.0,
 ) -> dict:
     """
     يحسب عدد الأسهم بناءً على:
@@ -28,6 +29,7 @@ def calculate_position_size(
     - نسبة المخاطرة 3% ديناميكية (Compounding)
 
     يدعم LONG وSHORT — يستخدم abs() لحساب المسافة.
+    يتحقق من buying_power لتجنب insufficient buying power.
 
     يُرجع dict يحتوي:
     - quantity    : عدد الأسهم
@@ -47,7 +49,14 @@ def calculate_position_size(
     quantity    = int((risk_amount * leverage) / risk_per_share)
 
     if quantity <= 0:
-        quantity = 1  # على الأقل سهم واحد
+        quantity = 1
+
+    # ── فحص buying_power: تأكد أن التكلفة لا تتجاوز ما هو متاح
+    if buying_power > 0:
+        max_affordable = int(buying_power * 0.95 / entry_price)  # 95% للأمان
+        if quantity > max_affordable:
+            print(f"⚠️  تقليل الكمية من {quantity} إلى {max_affordable} (buying_power=${buying_power:,.0f})")
+            quantity = max(1, max_affordable)
 
     return {
         "quantity":    quantity,
