@@ -13,21 +13,9 @@ from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
     ALPACA_BASE_URL,
-    ALPACA_DATA_URL,
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
 from risk import calculate_position_size, calculate_r
-from notifier import notify_short_not_allowed
-
-# ── alpaca-py: تُستخدم فقط لأوامر SHORT
-try:
-    from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
-    _ALPACA_PY_AVAILABLE = True
-except ImportError:
-    _ALPACA_PY_AVAILABLE = False
-    print("⚠️  alpaca-py غير مثبتة — أوامر SHORT ستستخدم requests كبديل")
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
@@ -100,7 +88,7 @@ def get_current_price(ticker: str) -> float:
     """يجلب آخر سعر للسهم (متوسط bid/ask)."""
     try:
         response = requests.get(
-            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/quotes/latest",  # ✅ Data API
+            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
             headers=HEADERS,
             timeout=10,
         )
@@ -111,17 +99,6 @@ def get_current_price(ticker: str) -> float:
     except Exception as e:
         print(f"❌ خطأ في جلب سعر {ticker}: {e}")
         return 0.0
-
-
-def _get_alpaca_client() -> Optional["TradingClient"]:
-    """يُنشئ TradingClient من alpaca-py — يُستخدم لأوامر SHORT فقط."""
-    if not _ALPACA_PY_AVAILABLE:
-        return None
-    try:
-        return TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
-    except Exception as e:
-        print(f"❌ خطأ في إنشاء Alpaca client: {e}")
-        return None
 
 
 # ─────────────────────────────────────────
@@ -169,30 +146,22 @@ def place_bracket_order(
 ) -> Optional[str]:
     """
     يُنفّذ Bracket Order — أمر دخول مع وقف خسارة وهدف.
-    - LONG  → requests مباشرة (الطريقة الأصلية)
-    - SHORT → alpaca-py الرسمية (تضمن التعرف الصحيح على Short)
+    يدعم LONG (buy) وSHORT (sell).
     يُرجع order_id إذا نجح، None إذا فشل.
     """
+    order_side = "buy" if side == "long" else "sell"
 
-    # ══════════════════════════════════════════
-    # SHORT: نستخدم alpaca-py الرسمية
-    # ══════════════════════════════════════════
-    if side == "short":
-        if _ALPACA_PY_AVAILABLE:
-            return _place_short_order_alpaca_py(ticker, quantity, entry_price, stop_loss, target)
-        else:
-            # fallback لـ requests إذا لم تكن المكتبة مثبتة
-            print("⚠️  alpaca-py غير متاحة — محاولة SHORT عبر requests")
-
-    # ══════════════════════════════════════════
-    # LONG: requests مباشرة (الطريقة الأصلية)
-    # ══════════════════════════════════════════
-    limit_price = round(entry_price * 1.001, 2)
+    # LONG:  limit_price أعلى قليلاً من السعر (نضمن التنفيذ)
+    # SHORT: limit_price أقل قليلاً من السعر
+    if side == "long":
+        limit_price = round(entry_price * 1.001, 2)
+    else:
+        limit_price = round(entry_price * 0.999, 2)
 
     order = {
         "symbol":        ticker,
         "qty":           str(quantity),
-        "side":          "buy",
+        "side":          order_side,
         "type":          "limit",
         "limit_price":   str(limit_price),
         "time_in_force": "day",
@@ -216,7 +185,8 @@ def place_bracket_order(
 
         if response.status_code in (200, 201):
             order_id = data.get("id", "")
-            print(f"✅ أمر شراء {ticker} تم — ID: {order_id[:8]}...")
+            label    = "شراء" if side == "long" else "بيع على المكشوف"
+            print(f"✅ أمر {label} {ticker} تم — ID: {order_id[:8]}...")
             return order_id
         else:
             print(f"❌ فشل أمر {ticker}: {data.get('message', 'خطأ غير معروف')}")
@@ -224,58 +194,6 @@ def place_bracket_order(
 
     except Exception as e:
         print(f"❌ خطأ في تنفيذ أمر {ticker}: {e}")
-        return None
-
-
-def _place_short_order_alpaca_py(
-    ticker:      str,
-    quantity:    int,
-    entry_price: float,
-    stop_loss:   float,
-    target:      float,
-) -> Optional[str]:
-    """
-    يُنفّذ أمر SHORT عبر alpaca-py الرسمية.
-    يضمن التعرف الصحيح على البيع على المكشوف.
-    """
-    client = _get_alpaca_client()
-    if not client:
-        return None
-
-    # SHORT: limit أقل قليلاً من السعر لضمان التنفيذ
-    limit_price = round(entry_price * 0.999, 2)
-
-    try:
-        order_data = LimitOrderRequest(
-            symbol=ticker,
-            qty=quantity,
-            side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-            limit_price=limit_price,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=round(target, 2)),
-            stop_loss=StopLossRequest(stop_price=round(stop_loss, 2)),
-        )
-
-        order = client.submit_order(order_data=order_data)
-        order_id = str(order.id)
-        print(f"✅ أمر SHORT {ticker} تم عبر alpaca-py — ID: {order_id[:8]}...")
-        return order_id
-
-    except Exception as e:
-        err_msg = str(e)
-        print(f"❌ فشل SHORT {ticker} عبر alpaca-py: {err_msg}")
-
-        # إذا كان الخطأ متعلقاً بصلاحيات الحساب
-        if "not allowed to short" in err_msg.lower() or "forbidden" in err_msg.lower():
-            try:
-                notify_short_not_allowed(
-                    ticker=ticker,
-                    reason="الحساب لا يدعم Short Selling — تأكد أن نوعه Margin في Alpaca",
-                )
-            except Exception:
-                pass
-
         return None
 
 
@@ -346,7 +264,6 @@ def open_meanrev_trade(
     - TP2 عند 3R: يخرج الـ 50% المتبقية
     - Trailing Stop يُفعَّل بعد TP1
     - رافعة مالية × 2
-    - SHORT يُنفَّذ عبر alpaca-py الرسمية
     """
     sizing = calculate_position_size(
         balance=balance,
@@ -465,12 +382,20 @@ def monitor_trade(trade: OpenTrade) -> dict:
         return {"status": "target", "price": current_price,
                 "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
 
-    # ── Trailing Stop (يُفعَّل بعد TP1 فقط للـ LONG)
-    if trade.side == "long" and trade.tp1_hit and trade.trail_step > 0:
-        new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
-        if new_stop > trade.stop_loss:
-            return {"status": "trail_updated", "price": current_price,
-                    "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+    # ── Trailing Stop (يُفعَّل بعد TP1 للـ LONG والـ SHORT)
+    if trade.tp1_hit and trade.trail_step > 0:
+        if trade.side == "long":
+            new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
+            if new_stop > trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+        elif trade.side == "short":
+            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
+            new_stop = current_price + trade.trail_step
+            new_stop = round(min(new_stop, trade.stop_loss), 4)
+            if new_stop < trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
