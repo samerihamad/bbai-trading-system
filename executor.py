@@ -13,6 +13,7 @@ from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
     ALPACA_BASE_URL,
+    ALPACA_DATA_URL,
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
 from risk import calculate_position_size, calculate_r
@@ -61,10 +62,7 @@ class OpenTrade:
 # ─────────────────────────────────────────
 
 def get_open_positions() -> list:
-    """
-    يجلب المراكز المفتوحة من Alpaca ويحوّلها إلى OpenTrade.
-    يُستدعى عند بدء التشغيل لتجنب فتح صفقات مكررة.
-    """
+    """يجلب المراكز المفتوحة من Alpaca عند بدء التشغيل."""
     try:
         response = requests.get(
             f"{ALPACA_BASE_URL}/v2/positions",
@@ -72,51 +70,37 @@ def get_open_positions() -> list:
             timeout=10,
         )
         if response.status_code != 200:
-            print(f"⚠️  فشل جلب المراكز: {response.status_code}")
             return []
 
-        positions = response.json()
-        trades    = []
-
-        for pos in positions:
+        trades = []
+        for pos in response.json():
             symbol   = pos.get("symbol", "")
             side_raw = pos.get("side", "long")
             side     = "long" if side_raw == "long" else "short"
             qty      = abs(int(float(pos.get("qty", 1))))
             entry    = float(pos.get("avg_entry_price", 0))
-
             if not symbol or entry <= 0:
                 continue
 
             if side == "long":
-                stop = round(entry * 0.95, 2)
-                tp1  = round(entry * 1.02, 2)
-                tp2  = round(entry * 1.04, 2)
+                stop, tp1, tp2 = round(entry*0.95,2), round(entry*1.02,2), round(entry*1.04,2)
             else:
-                stop = round(entry * 1.05, 2)
-                tp1  = round(entry * 0.98, 2)
-                tp2  = round(entry * 0.96, 2)
+                stop, tp1, tp2 = round(entry*1.05,2), round(entry*0.98,2), round(entry*0.96,2)
 
-            tp1_qty            = max(1, qty // 2)
-            quantity_remaining = qty - tp1_qty
-
-            trade = OpenTrade(
+            tp1_qty = max(1, qty // 2)
+            trade   = OpenTrade(
                 ticker=symbol, strategy="meanrev", side=side,
                 order_id="recovered", entry_price=entry,
-                stop_loss=stop, target=tp2,
-                target_tp1=tp1, target_tp2=tp2,
+                stop_loss=stop, target=tp2, target_tp1=tp1, target_tp2=tp2,
                 trail_stop=0.0, trail_step=0.0,
-                quantity=qty, quantity_remaining=quantity_remaining,
+                quantity=qty, quantity_remaining=qty - tp1_qty,
                 tp1_hit=False, peak_price=entry, risk_amount=0.0,
             )
             trades.append(trade)
-            print(f"  ♻️  استعادة: {symbol} [{side.upper()}] qty={qty} (TP1={tp1_qty} | TP2={quantity_remaining}) entry=${entry:.2f}")
+            print(f"  ♻️  استعادة: {symbol} [{side.upper()}] qty={qty} (TP1={tp1_qty} | TP2={qty-tp1_qty}) entry=${entry:.2f}")
 
-        if trades:
-            print(f"✅ تم استعادة {len(trades)} مركز مفتوح من Alpaca")
-        else:
-            print("ℹ️  لا توجد مراكز مفتوحة في Alpaca")
-
+        msg = f"✅ تم استعادة {len(trades)} مركز مفتوح من Alpaca" if trades else "ℹ️  لا توجد مراكز مفتوحة في Alpaca"
+        print(msg)
         return trades
 
     except Exception as e:
