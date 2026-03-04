@@ -163,10 +163,11 @@ def get_volume_data(assets: list) -> pd.DataFrame:
                     trade.get("p") or 0
                 )
 
-                volume = float(
-                    daily.get("v") or
-                    prev.get("v") or 0
-                )
+                # ── إذا كان حجم اليوم الحالي أقل من المطلوب
+                # نستخدم حجم اليوم السابق كمرجع أكثر موثوقية
+                daily_vol = float(daily.get("v") or 0)
+                prev_vol  = float(prev.get("v") or 0)
+                volume    = max(daily_vol, prev_vol)
 
                 if not last_price or not volume:
                     continue
