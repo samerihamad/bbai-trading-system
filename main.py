@@ -462,7 +462,6 @@ def main():
                 if not risk_manager.can_trade():
                     log("System paused -- daily loss limit reached")
                 elif not daily_stocks and not _pre_market_done:
-                    # بدأ النظام أثناء ساعات التداول
                     if system_state.maintenance_mode:
                         log("MAINTENANCE MODE -- waiting for /resume before pre-market")
                     else:
