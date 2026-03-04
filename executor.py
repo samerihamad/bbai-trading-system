@@ -13,9 +13,11 @@ from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
     ALPACA_BASE_URL,
+    ALPACA_DATA_URL,
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
 from risk import calculate_position_size, calculate_r
+from notifier import _send as telegram_send
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
@@ -88,7 +90,7 @@ def get_current_price(ticker: str) -> float:
     """يجلب آخر سعر للسهم (متوسط bid/ask)."""
     try:
         response = requests.get(
-            f"{ALPACA_BASE_URL}/v2/stocks/{ticker}/quotes/latest",
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/quotes/latest",  # ✅ Data API
             headers=HEADERS,
             timeout=10,
         )
@@ -265,6 +267,35 @@ def open_meanrev_trade(
     - Trailing Stop يُفعَّل بعد TP1
     - رافعة مالية × 2
     """
+    # ── فحص صلاحية SHORT قبل المتابعة
+    if signal.side == "short":
+        account = get_account()
+        if not account.get("shorting_enabled", False):
+            msg = (
+                "⛔ <b>SHORT غير مسموح | Short Not Allowed</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"📌 السهم : {signal.ticker}\n"
+                f"💰 سعر الدخول : ${signal.entry_price:.2f}\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "❌ <b>السبب:</b> الحساب الحالي <b>Cash Account</b> لا يدعم البيع على المكشوف\n\n"
+                "✅ <b>الحل:</b> تواصل مع دعم Alpaca لتحويل الحساب إلى <b>Margin Account</b>\n"
+                "📧 support@alpaca.markets"
+            )
+            telegram_send(msg)
+            print(f"⛔ SHORT غير مسموح للحساب الحالي — تم إرسال تنبيه Telegram ({signal.ticker})")
+            return None
+    # ── فحص صلاحية SHORT قبل المتابعة
+    if signal.side == "short":
+        account = get_account()
+        if not account.get("shorting_enabled", False):
+            reason = "الحساب من نوع Cash — يجب تحويله إلى Margin لتفعيل Short Selling"
+            print(f"⛔ SHORT غير مسموح في هذا الحساب — {signal.ticker}")
+            print(f"   ℹ️  {reason}")
+            try:
+                notify_short_not_allowed(ticker=signal.ticker, reason=reason)
+            except Exception as e:
+                print(f"❌ خطأ في إرسال تنبيه Telegram: {e}")
+            return None
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
