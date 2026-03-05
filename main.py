@@ -29,11 +29,6 @@ from executor         import (
     monitor_trade,
     place_market_sell,
     close_all_positions,
-    get_open_positions,
-    get_current_price,
-    sync_with_alpaca,
-    _save_open_trades,
-    _delete_open_trades_sheets,
     OpenTrade,
 )
 from strategy_meanrev import refresh_allowed_tickers
@@ -65,7 +60,8 @@ open_trades  : list              = []
 daily_stocks : dict              = {}
 last_no_opp  : datetime          = datetime.now(TZ) - timedelta(hours=2)
 
-_pre_market_done : bool = False
+_pre_market_done  : bool = False
+_pre_alert_done   : bool = False
 _close_done      : bool = False
 _current_day     : str  = ""
 
@@ -91,11 +87,20 @@ def is_weekday() -> bool:
     return get_ny_time().weekday() < 5
 
 
-def is_pre_market_time() -> bool:
+def is_pre_market_alert_time() -> bool:
+    """09:00 → رسالة تنبيه فقط 'السوق يفتح بعد 30 دقيقة'"""
     if not is_weekday():
         return False
     t = get_ny_time().strftime("%H:%M")
-    return "09:00" <= t < MARKET_OPEN
+    return "09:00" <= t < "09:05"
+
+
+def is_pre_market_time() -> bool:
+    """09:35 → تشغيل Pre-Market الفعلي (اختيار الأسهم)"""
+    if not is_weekday():
+        return False
+    t = get_ny_time().strftime("%H:%M")
+    return "09:35" <= t < "09:45"
 
 
 def is_market_hours() -> bool:
@@ -112,11 +117,12 @@ def is_close_time() -> bool:
 
 
 def check_new_day():
-    global _pre_market_done, _close_done, _current_day
+    global _pre_market_done, _close_done, _current_day, _pre_alert_done
     today = get_ny_time().strftime("%Y-%m-%d")
     if today != _current_day:
         _current_day     = today
         _pre_market_done = False
+        _pre_alert_done  = False
         _close_done      = False
         log(f"New trading day: {today} -- flags reset")
 
@@ -138,6 +144,25 @@ def get_system_context() -> dict:
 # -----------------------------------------
 # روتين ما قبل الافتتاح
 # -----------------------------------------
+
+def run_pre_market_alert():
+    """09:00 — رسالة تنبيه فقط بدون اختيار أسهم."""
+    global _pre_alert_done
+    if _pre_alert_done:
+        return
+    _pre_alert_done = True
+    try:
+        from notifier import _send
+        _send(
+            "🔔 <b>تنبيه | Market Alert</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🇬🇧 Market opens in <b>30 minutes</b>\n\n"
+            "🇦🇪 السوق يفتح بعد <b>30 دقيقة</b>"
+        )
+        log("Pre-market alert sent — market opens in 30 min")
+    except Exception as e:
+        log(f"Alert error: {e}")
+
 
 def run_pre_market():
     global daily_stocks, _pre_market_done
@@ -172,19 +197,6 @@ def run_pre_market():
 
 def monitor_open_trades():
     global open_trades
-
-    if not open_trades:
-        return
-
-    # ── تحقق من التزامن مع Alpaca (يكتشف الإغلاق اليدوي)
-    before = len(open_trades)
-    sync_with_alpaca(open_trades)
-    if len(open_trades) < before:
-        # صفقة أُغلقت يدوياً — حدّث Google Sheets
-        if open_trades:
-            _save_open_trades(open_trades)
-        else:
-            _delete_open_trades_sheets()
 
     if not open_trades:
         return
@@ -313,12 +325,6 @@ def monitor_open_trades():
     for trade in trades_to_remove:
         open_trades.remove(trade)
 
-    if trades_to_remove:
-        if open_trades:
-            _save_open_trades(open_trades)
-        else:
-            _delete_open_trades_sheets()
-
 
 # -----------------------------------------
 # البحث عن إشارات جديدة
@@ -347,7 +353,6 @@ def scan_for_signals():
             trade = open_meanrev_trade(signal, balance)
             if trade:
                 open_trades.append(trade)
-                _save_open_trades(open_trades)
                 found_signal = True
                 try:
                     notify_trade_open(
@@ -393,30 +398,27 @@ def run_market_close():
     _close_done = True
 
     try:
-        # ── الصفقات المفتوحة تنتقل لليوم التالي — لا نغلقها
-        open_trades_summary = []
         if open_trades:
-            log(f"{len(open_trades)} open trade(s) will carry over to next session:")
+            log(f"Closing {len(open_trades)} open trades...")
             for trade in open_trades:
-                current_price = get_current_price(trade.ticker)
-                if current_price > 0 and trade.stop_loss != trade.entry_price:
-                    if trade.side == "long":
-                        r = round((current_price - trade.entry_price) / abs(trade.entry_price - trade.stop_loss), 2)
-                    else:
-                        r = round((trade.entry_price - current_price) / abs(trade.entry_price - trade.stop_loss), 2)
-                else:
-                    r = 0.0
-                open_trades_summary.append({
-                    "ticker": trade.ticker,
-                    "side":   trade.side,
-                    "entry":  trade.entry_price,
-                    "r":      r,
-                })
-                log(f"  → {trade.ticker} [{trade.side.upper()}] entry=${trade.entry_price:.2f} | R={r:+.2f}")
+                try:
+                    exit_qty = trade.quantity_remaining if trade.tp1_hit else trade.quantity
+                    place_market_sell(trade.ticker, exit_qty, side=trade.side)
+                    record_trade(
+                        ticker=trade.ticker, strategy=trade.strategy,
+                        entry_price=trade.entry_price, exit_price=trade.entry_price,
+                        quantity=exit_qty, stop_loss=trade.stop_loss,
+                        target=trade.target, risk_amount=trade.risk_amount,
+                        exit_reason="eod", opened_at=trade.opened_at, side=trade.side,
+                    )
+                except Exception as e:
+                    log(f"Error closing {trade.ticker}: {e}")
+            close_all_positions()
+            open_trades.clear()
 
         account = get_account()
         balance = account.get("balance", 0) if account else 0
-        send_daily_report(balance, open_trades=open_trades_summary)
+        send_daily_report(balance)
         log("Daily report sent")
 
     except Exception as e:
@@ -456,14 +458,6 @@ def main():
             log(f"Connection error: {e} -- retrying in 60s...")
         time.sleep(60)
 
-    # ── استعادة الصفقات المفتوحة (من Sheets أولاً، ثم Alpaca)
-    log("Checking for open positions...")
-    recovered = get_open_positions()
-    if recovered:
-        open_trades.extend(recovered)
-        log(f"Recovered {len(recovered)} open position(s) — will monitor them")
-    log("-" * 55)
-
     # بدء الاستماع لأوامر Telegram في الخلفية
     start_command_listener(get_system_context)
     log("Telegram command listener started -- send /help for commands")
@@ -482,7 +476,10 @@ def main():
             check_new_day()
             t = get_ny_time().strftime("%H:%M")
 
-            if is_pre_market_time() and not _pre_market_done:
+            if is_pre_market_alert_time() and not _pre_alert_done:
+                run_pre_market_alert()
+
+            elif is_pre_market_time() and not _pre_market_done:
                 run_pre_market()
 
             elif is_market_hours():
