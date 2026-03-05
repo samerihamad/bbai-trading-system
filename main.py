@@ -32,7 +32,7 @@ from executor         import (
     get_open_positions,
     get_current_price,
     _save_open_trades,
-    _delete_open_trades_file,
+    _delete_open_trades_sheets,
     OpenTrade,
 )
 from strategy_meanrev import refresh_allowed_tickers
@@ -299,12 +299,11 @@ def monitor_open_trades():
     for trade in trades_to_remove:
         open_trades.remove(trade)
 
-    # حفظ الحالة بعد إغلاق أي صفقة
     if trades_to_remove:
         if open_trades:
             _save_open_trades(open_trades)
         else:
-            _delete_open_trades_file()
+            _delete_open_trades_sheets()
 
 
 # -----------------------------------------
@@ -334,7 +333,7 @@ def scan_for_signals():
             trade = open_meanrev_trade(signal, balance)
             if trade:
                 open_trades.append(trade)
-                _save_open_trades(open_trades)  # حفظ فوري
+                _save_open_trades(open_trades)
                 found_signal = True
                 try:
                     notify_trade_open(
@@ -401,7 +400,6 @@ def run_market_close():
                 })
                 log(f"  → {trade.ticker} [{trade.side.upper()}] entry=${trade.entry_price:.2f} | R={r:+.2f}")
 
-        # ── إرسال التقرير اليومي
         account = get_account()
         balance = account.get("balance", 0) if account else 0
         send_daily_report(balance, open_trades=open_trades_summary)
@@ -444,7 +442,7 @@ def main():
             log(f"Connection error: {e} -- retrying in 60s...")
         time.sleep(60)
 
-    # ── استعادة الصفقات المفتوحة (من الملف أولاً، ثم Alpaca)
+    # ── استعادة الصفقات المفتوحة (من Sheets أولاً، ثم Alpaca)
     log("Checking for open positions...")
     recovered = get_open_positions()
     if recovered:
