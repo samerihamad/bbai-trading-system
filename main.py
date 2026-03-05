@@ -31,6 +31,7 @@ from executor         import (
     close_all_positions,
     get_open_positions,
     get_current_price,
+    sync_with_alpaca,
     _save_open_trades,
     _delete_open_trades_sheets,
     OpenTrade,
@@ -171,6 +172,19 @@ def run_pre_market():
 
 def monitor_open_trades():
     global open_trades
+
+    if not open_trades:
+        return
+
+    # ── تحقق من التزامن مع Alpaca (يكتشف الإغلاق اليدوي)
+    before = len(open_trades)
+    sync_with_alpaca(open_trades)
+    if len(open_trades) < before:
+        # صفقة أُغلقت يدوياً — حدّث Google Sheets
+        if open_trades:
+            _save_open_trades(open_trades)
+        else:
+            _delete_open_trades_sheets()
 
     if not open_trades:
         return
