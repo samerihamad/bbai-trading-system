@@ -413,12 +413,6 @@ def run_market_close():
 
     log("=== MARKET CLOSE ROUTINE END ===")
 
-    except Exception as e:
-        log(f"Error in run_market_close: {e}")
-        traceback.print_exc()
-
-    log("=== MARKET CLOSE ROUTINE END ===")
-
 
 # -----------------------------------------
 # الحلقة الرئيسية
