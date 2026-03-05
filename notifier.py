@@ -76,9 +76,10 @@ def notify_trade_open(
     price: float, quantity: int,
     stop_loss: float, target: float, risk_amount: float,
 ) -> bool:
-    emoji   = "🟩" if "BUY" in side else "🟥"
-    side_ar = "شراء" if "BUY" in side else "بيع على المكشوف"
-    r_ratio = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
+    emoji       = "🟩" if "BUY" in side else "🟥"
+    side_ar     = "شراء" if "BUY" in side else "بيع على المكشوف"
+    r_ratio     = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
+    total_value = round(price * quantity, 2)
 
     msg = (
         f"{emoji} <b>New Trade -- {ticker}</b>\n"
@@ -86,26 +87,28 @@ def notify_trade_open(
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "🇬🇧 <b>English</b>\n"
-        f"📊 Strategy  : {strategy}\n"
-        f"▶️  Direction  : {side}\n"
-        f"💰 Entry      : ${price:.2f}\n"
-        f"🔢 Qty        : {quantity} shares\n"
-        f"🔴 Stop Loss  : ${stop_loss:.2f}\n"
-        f"🎯 Target     : ${target:.2f}\n"
-        f"📈 R Ratio    : {r_ratio}R\n"
-        f"⚠️  Risk       : ${risk_amount:.2f}\n"
+        f"📊 Strategy    : {strategy}\n"
+        f"▶️  Direction    : {side}\n"
+        f"💰 Entry        : ${price:.2f}\n"
+        f"🔢 Qty          : {quantity} shares\n"
+        f"💵 Total Value  : ${total_value:,.2f}\n"
+        f"🔴 Stop Loss    : ${stop_loss:.2f}\n"
+        f"🎯 Target       : ${target:.2f}\n"
+        f"📈 R Ratio      : {r_ratio}R\n"
+        f"⚠️  Risk         : ${risk_amount:.2f}\n"
 
         "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "🇦🇪 <b>العربية</b>\n"
-        f"📊 الاستراتيجية : {strategy}\n"
-        f"▶️  الاتجاه      : {side_ar}\n"
-        f"💰 الدخول       : ${price:.2f}\n"
-        f"🔢 الكمية       : {quantity} سهم\n"
-        f"🔴 وقف الخسارة  : ${stop_loss:.2f}\n"
-        f"🎯 الهدف        : ${target:.2f}\n"
-        f"📈 نسبة R       : {r_ratio}R\n"
-        f"⚠️  المخاطرة     : ${risk_amount:.2f}"
+        f"📊 الاستراتيجية  : {strategy}\n"
+        f"▶️  الاتجاه       : {side_ar}\n"
+        f"💰 الدخول        : ${price:.2f}\n"
+        f"🔢 الكمية        : {quantity} سهم\n"
+        f"💵 إجمالي المبلغ : ${total_value:,.2f}\n"
+        f"🔴 وقف الخسارة   : ${stop_loss:.2f}\n"
+        f"🎯 الهدف         : ${target:.2f}\n"
+        f"📈 نسبة R        : {r_ratio}R\n"
+        f"⚠️  المخاطرة      : ${risk_amount:.2f}"
     )
     return _send(msg)
 
