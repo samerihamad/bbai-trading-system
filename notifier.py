@@ -68,28 +68,7 @@ def notify_no_opportunity() -> bool:
 
 
 # -----------------------------------------
-# 3. تنبيه SHORT غير مفعّل
-# -----------------------------------------
-
-def notify_short_not_allowed(ticker: str, reason: str = "") -> bool:
-    reason_line = f"\n&#128221; السبب : {reason}" if reason else ""
-    msg = (
-        f"&#9940; <b>SHORT غير مسموح — {ticker}</b>\n"
-        f"&#128336; {_now()}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#128202; تم رصد فرصة SHORT على <b>{ticker}</b>\n"
-        f"&#10060; لكن الحساب لا يدعم البيع على المكشوف"
-        f"{reason_line}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        "&#128161; <b>الحل:</b>\n"
-        "تأكد أن نوع الحساب <b>Margin</b> وليس Cash\n"
-        "وأن خيار Shorting Enabled مفعّل في إعدادات Alpaca"
-    )
-    return _send(msg)
-
-
-# -----------------------------------------
-# 4. فتح صفقة
+# 3. فتح صفقة
 # -----------------------------------------
 
 def notify_trade_open(
@@ -226,6 +205,7 @@ def notify_daily_report(
     worst_trade: float = 0.0,
     avg_win: float = 0.0,
     avg_loss: float = 0.0,
+    open_trades: list = None,
 ) -> bool:
 
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
@@ -260,8 +240,16 @@ def notify_daily_report(
             f"📉 Avg Loss : ${avg_loss:.2f}\n"
         )
 
+    msg += f"\n{bal_emoji} <b>Balance</b> : ${balance:,.2f}\n"
+
+    # ── الصفقات المفتوحة (إن وجدت)
+    if open_trades:
+        msg += "\n📂 <b>Open Positions (carry over)</b>\n"
+        for t in open_trades:
+            side_emoji = "🟢" if t["side"] == "long" else "🔴"
+            msg += f"  {side_emoji} {t['ticker']} | entry=${t['entry']:.2f} | R={t['r']:+.2f}\n"
+
     msg += (
-        f"\n{bal_emoji} <b>Balance</b> : ${balance:,.2f}\n"
         "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "🇦🇪 <b>العربية</b>\n\n"
@@ -282,4 +270,82 @@ def notify_daily_report(
 
     msg += f"\n{bal_emoji} <b>الرصيد</b> : ${balance:,.2f}"
 
+    # ── الصفقات المفتوحة بالعربية
+    if open_trades:
+        msg += "\n\n📂 <b>صفقات مفتوحة (تنتقل لغد)</b>\n"
+        for t in open_trades:
+            side_ar    = "شراء" if t["side"] == "long" else "مكشوف"
+            side_emoji = "🟢" if t["side"] == "long" else "🔴"
+            msg += f"  {side_emoji} {t['ticker']} | {side_ar} | دخول=${t['entry']:.2f} | R={t['r']:+.2f}\n"
+
     return _send(msg)
+    
+#def notify_daily_report(
+ #   date: str,
+ #   total_trades: int,
+ #   losses: int,
+ #   total_r: float,
+ #   total_pnl: float,
+ #   balance: float,
+ #   long_trades: int = 0,
+ #   short_trades: int = 0,
+ #   best_trade: float = 0.0,
+ #   worst_trade: float = 0.0,
+ #   avg_win: float = 0.0,
+ #   avg_loss: float = 0.0,
+#) -> bool:
+ #   win_rate    = (wins / total_trades * 100) if total_trades > 0 else 0
+ #   pnl_emoji   = "&#128200;" if total_pnl >= 0 else "&#128201;"
+ #   pnl_sign    = "+" if total_pnl >= 0 else ""
+ #   r_emoji     = "&#9989;" if total_r >= 0 else "&#10060;"
+ #   r_sign      = "+" if total_r >= 0 else ""
+ #   wrate_emoji = "&#129001;" if win_rate >= 50 else "&#128997;"
+ #   bal_emoji   = "&#128176;"
+
+#    msg = (
+#        f"&#128202; <b>Daily Report -- {date}</b>\n"
+#        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+
+        # القسم الانجليزي
+#        "&#127468;&#127463; <b>English</b>\n"
+#        f"&#128290; Total Trades : {total_trades}  "
+#        f"(&#129001; {wins} Win / &#128997; {losses} Loss)\n"
+#        f"{wrate_emoji} Win Rate    : {win_rate:.1f}%\n"
+#        f"&#129001; Long        : {long_trades}  |  "
+#        f"&#128997; Short       : {short_trades}\n"
+#        f"{r_emoji} Total R     : {r_sign}{total_r:.2f}R\n"
+#        f"{pnl_emoji} Total PnL  : ${pnl_sign}{total_pnl:.2f}\n"
+#    )
+
+#    if total_trades > 0:
+#        msg += (
+#            f"&#127919; Best Trade  : +${best_trade:.2f}\n"
+#            f"&#128308; Worst Trade : ${worst_trade:.2f}\n"
+#            f"&#128200; Avg Win     : +${avg_win:.2f}\n"
+#            f"&#128201; Avg Loss    : ${avg_loss:.2f}\n"
+#        )
+
+#    msg += (
+#        f"{bal_emoji} Balance    : ${balance:,.2f}\n"
+#        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+
+#        # القسم العربي
+#        "&#127462;&#127466; <b>&#x627;&#x644;&#x639;&#x631;&#x628;&#x64a;&#x629;</b>\n"
+#        f"&#128290; &#x625;&#x62c;&#x645;&#x627;&#x644;&#x64a; &#x627;&#x644;&#x635;&#x641;&#x642;&#x627;&#x62a; : {total_trades}  "
+#        f"(&#129001; {wins} &#x631;&#x628;&#x62d; / &#128997; {losses} &#x62e;&#x633;&#x627;&#x631;&#x629;)\n"
+#        f"{wrate_emoji} &#x646;&#x633;&#x628;&#x629; &#x627;&#x644;&#x641;&#x648;&#x632;  : {win_rate:.1f}%\n"
+#        f"&#129001; &#x634;&#x631;&#x627;&#x621; : {long_trades}  |  "
+#        f"&#128997; &#x645;&#x643;&#x634;&#x648;&#x641; : {short_trades}\n"
+#        f"{r_emoji} &#x625;&#x62c;&#x645;&#x627;&#x644;&#x64a; R : {r_sign}{total_r:.2f}R\n"
+#        f"{pnl_emoji} &#x625;&#x62c;&#x645;&#x627;&#x644;&#x64a; &#x627;&#x644;&#x631;&#x628;&#x62d; : ${pnl_sign}{total_pnl:.2f}\n"
+#    )
+
+#    if total_trades > 0:
+#        msg += (
+#            f"&#127919; &#x623;&#x641;&#x636;&#x644; &#x635;&#x641;&#x642;&#x629; : +${best_trade:.2f}\n"
+#            f"&#128308; &#x623;&#x633;&#x648;&#x623; &#x635;&#x641;&#x642;&#x629;  : ${worst_trade:.2f}\n"
+#        )
+
+#    msg += f"{bal_emoji} &#x627;&#x644;&#x631;&#x635;&#x64a;&#x62f; : ${balance:,.2f}"
+
+#    return _send(msg)
