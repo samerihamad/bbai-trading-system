@@ -30,18 +30,10 @@ MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 
 class SystemState:
     def __init__(self):
-        # الأولوية: Environment Variable → MAINTENANCE_MODE=true في Render Dashboard
-        # إذا كانت true → النظام يبدأ في وضع الصيانة حتى ترسل /resume
-        env_val               = os.environ.get("MAINTENANCE_MODE", "false").strip().lower()
-        self.maintenance_mode = env_val == "true"
-        self._last_update_id  = 0
-
-        if self.maintenance_mode:
-            print(
-                "⚠️  MAINTENANCE_MODE=true — System starting PAUSED\n"
-                "   Send /resume via Telegram to start trading.",
-                flush=True,
-            )
+        # قراءة الـ flag عند البداية
+        # لو كان موجوداً من جلسة سابقة نتجاهله ونبدأ نظيف
+        self.maintenance_mode : bool = False
+        self._last_update_id  : int  = 0
 
     def enter_maintenance(self):
         """يُفعّل وضع الصيانة ويكتب الـ flag على الـ disk."""
@@ -210,6 +202,52 @@ def _handle_command(command: str, context: dict):
             f"{risk_info}"
         )
 
+    # ── /closeall : إغلاق كل المراكز فوراً
+    elif command == "/closeall":
+        context_data = context() if callable(context) else context
+        open_trades  = context_data.get("open_trades", [])
+
+        if not open_trades:
+            _send("ℹ️ لا توجد صفقات مفتوحة حالياً.")
+        else:
+            _send(
+                f"⚠️ <b>تحذير</b> — سيتم إغلاق {len(open_trades)} صفقة مفتوحة فوراً!\n"
+                "أرسل /confirmclose للتأكيد."
+            )
+            system_state._pending_closeall = True
+
+    # ── /confirmclose : تأكيد إغلاق كل المراكز
+    elif command == "/confirmclose":
+        if not getattr(system_state, "_pending_closeall", False):
+            _send("❓ لا يوجد أمر إغلاق معلق. أرسل /closeall أولاً.")
+        else:
+            system_state._pending_closeall = False
+            try:
+                from executor import close_all_positions
+                success = close_all_positions()
+                # مسح الصفقات من الذاكرة
+                context_data = context() if callable(context) else context
+                open_trades  = context_data.get("open_trades", [])
+                open_trades.clear()
+                # مسح Google Sheets
+                try:
+                    from executor import _delete_open_trades_sheets
+                    _delete_open_trades_sheets()
+                except Exception:
+                    pass
+
+                if success:
+                    _send(
+                        "✅ <b>تم إغلاق كل المراكز</b>\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        "🇬🇧 All positions closed successfully.\n\n"
+                        "🇦🇪 تم إغلاق جميع الصفقات بنجاح."
+                    )
+                else:
+                    _send("⚠️ فشل إغلاق بعض المراكز — تحقق من Alpaca يدوياً.")
+            except Exception as e:
+                _send(f"❌ خطأ في إغلاق المراكز: {e}")
+
     # ── /help
     elif command == "/help":
         _send(
@@ -221,6 +259,8 @@ def _handle_command(command: str, context: dict):
             "    استئناف النظام بعد الصيانة\n\n"
             "📊 /status\n"
             "    عرض حالة النظام الآن\n\n"
+            "🚨 /closeall\n"
+            "    إغلاق كل الصفقات المفتوحة فوراً\n\n"
             "📖 /help\n"
             "    هذه القائمة"
         )
