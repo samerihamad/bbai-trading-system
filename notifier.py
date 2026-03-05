@@ -76,22 +76,36 @@ def notify_trade_open(
     price: float, quantity: int,
     stop_loss: float, target: float, risk_amount: float,
 ) -> bool:
-    emoji     = "&#129001;" if "BUY" in side else "&#128997;"
-    r_ratio   = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
-    side_ar   = "&#x634;&#x631;&#x627;&#x621;" if "BUY" in side else "&#x628;&#x064a;&#x0639; &#x0639;&#x0644;&#x0649; &#x0627;&#x0644;&#x0645;&#x0643;&#x0634;&#x0648;&#x0641;"
+    emoji   = "🟩" if "BUY" in side else "🟥"
+    side_ar = "شراء" if "BUY" in side else "بيع على المكشوف"
+    r_ratio = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
 
     msg = (
         f"{emoji} <b>New Trade -- {ticker}</b>\n"
-        f"&#128197; {_now()}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#128202; Strategy  : {strategy}\n"
-        f"&#9654;  Direction  : {side} / {side_ar}\n"
-        f"&#128176; Entry      : ${price:.2f}\n"
-        f"&#128290; Qty        : {quantity} shares\n"
-        f"&#128308; Stop Loss  : ${stop_loss:.2f}\n"
-        f"&#127919; Target     : ${target:.2f}\n"
-        f"&#128200; R Ratio    : {r_ratio}R\n"
-        f"&#9888;  Risk       : ${risk_amount:.2f}"
+        f"📅 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇬🇧 <b>English</b>\n"
+        f"📊 Strategy  : {strategy}\n"
+        f"▶️  Direction  : {side}\n"
+        f"💰 Entry      : ${price:.2f}\n"
+        f"🔢 Qty        : {quantity} shares\n"
+        f"🔴 Stop Loss  : ${stop_loss:.2f}\n"
+        f"🎯 Target     : ${target:.2f}\n"
+        f"📈 R Ratio    : {r_ratio}R\n"
+        f"⚠️  Risk       : ${risk_amount:.2f}\n"
+
+        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇦🇪 <b>العربية</b>\n"
+        f"📊 الاستراتيجية : {strategy}\n"
+        f"▶️  الاتجاه      : {side_ar}\n"
+        f"💰 الدخول       : ${price:.2f}\n"
+        f"🔢 الكمية       : {quantity} سهم\n"
+        f"🔴 وقف الخسارة  : ${stop_loss:.2f}\n"
+        f"🎯 الهدف        : ${target:.2f}\n"
+        f"📈 نسبة R       : {r_ratio}R\n"
+        f"⚠️  المخاطرة     : ${risk_amount:.2f}"
     )
     return _send(msg)
 
@@ -105,13 +119,22 @@ def notify_stop_updated(
     new_stop: float, current_price: float,
 ) -> bool:
     msg = (
-        f"&#128260; <b>Stop Updated -- {ticker}</b>\n"
-        f"&#128336; {_now()}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#128200; Price     : ${current_price:.2f}\n"
-        f"&#128308; Old Stop  : ${old_stop:.2f}\n"
-        f"&#128994; New Stop  : ${new_stop:.2f}\n"
-        "&#x062a;&#x0645; &#x062a;&#x062d;&#x0631;&#x064a;&#x0643; &#x0648;&#x0642;&#x0641; &#x0627;&#x0644;&#x062e;&#x0633;&#x0627;&#x0631;&#x0629;"
+        f"🔄 <b>Stop Updated -- {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇬🇧 <b>English</b>\n"
+        f"📈 Price     : ${current_price:.2f}\n"
+        f"🔴 Old Stop  : ${old_stop:.2f}\n"
+        f"🟢 New Stop  : ${new_stop:.2f}\n"
+
+        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇦🇪 <b>العربية</b>\n"
+        f"📈 السعر         : ${current_price:.2f}\n"
+        f"🔴 الوقف القديم  : ${old_stop:.2f}\n"
+        f"🟢 الوقف الجديد  : ${new_stop:.2f}\n"
+        "تم تحريك وقف الخسارة"
     )
     return _send(msg)
 
@@ -125,25 +148,16 @@ def notify_trade_win(
     quantity: int, profit: float, r_achieved: float,
 ) -> bool:
     msg = (
-        f"✅ <b>WIN -- {ticker}</b>\n"
-        f"🕐 {_now()}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "🇬🇧 <b>English</b>\n"
-        f"💰 Entry   : ${entry_price:.2f}\n"
-        f"💰 Exit    : ${exit_price:.2f}\n"
-        f"🔢 Qty     : {quantity} shares\n"
-        f"📈 Profit  : <b>+${profit:.2f}</b>\n"
-        f"🎯 R       : {r_achieved:.2f}R\n"
-
-        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "🇦🇪 <b>العربية</b>\n"
-        f"💰 الدخول  : ${entry_price:.2f}\n"
-        f"💰 الخروج  : ${exit_price:.2f}\n"
-        f"🔢 الكمية  : {quantity} سهم\n"
-        f"📈 الربح   : <b>+${profit:.2f}</b>\n"
-        f"🎯 النسبة  : {r_achieved:.2f}R\n"
+        f"&#9989; <b>WIN -- {ticker}</b>\n"
+        f"&#128336; {_now()}\n"
+        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+        f"&#128176; Entry    : ${entry_price:.2f}\n"
+        f"&#128176; Exit     : ${exit_price:.2f}\n"
+        f"&#128290; Qty      : {quantity} shares\n"
+        f"&#128200; Profit   : <b>+${profit:.2f}</b>\n"
+        f"&#127919; R        : {r_achieved:.1f}R\n"
+        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+        f"&#x631;&#x628;&#x62d; | +${profit:.2f}"
     )
     return _send(msg)
 
@@ -159,30 +173,21 @@ def notify_trade_loss(
     warning_en = ""
     warning_ar = ""
     if daily_losses >= 2:
-        warning_en = "\n⛔ <b>Daily loss limit reached -- System STOPPED</b>"
-        warning_ar = "\n⛔ <b>تم الوصول لحد الخسائر -- النظام متوقف</b>"
+        warning_en = "\n&#9940; <b>Daily loss limit reached -- System STOPPED</b>"
+        warning_ar = "\n&#x062a;&#x0645; &#x0627;&#x0644;&#x0648;&#x0635;&#x0648;&#x0644; &#x0644;&#x062d;&#x062f; &#x0627;&#x0644;&#x062e;&#x0633;&#x0627;&#x0626;&#x0631; -- &#x0627;&#x0644;&#x0646;&#x0638;&#x0627;&#x0645; &#x0645;&#x062a;&#x0648;&#x0642;&#x0641;"
 
     msg = (
-        f"❌ <b>LOSS -- {ticker}</b>\n"
-        f"🕐 {_now()}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "🇬🇧 <b>English</b>\n"
-        f"💰 Entry       : ${entry_price:.2f}\n"
-        f"💰 Exit        : ${exit_price:.2f}\n"
-        f"🔢 Qty         : {quantity} shares\n"
-        f"📉 Loss        : <b>-${loss:.2f}</b>\n"
-        f"📉 Daily Loss  : {daily_losses}/2"
-        f"{warning_en}\n"
-
-        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        "🇦🇪 <b>العربية</b>\n"
-        f"💰 الدخول       : ${entry_price:.2f}\n"
-        f"💰 الخروج       : ${exit_price:.2f}\n"
-        f"🔢 الكمية       : {quantity} سهم\n"
-        f"📉 الخسارة      : <b>-${loss:.2f}</b>\n"
-        f"📉 خسائر اليوم : {daily_losses}/2"
+        f"&#10060; <b>LOSS -- {ticker}</b>\n"
+        f"&#128336; {_now()}\n"
+        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+        f"&#128176; Entry       : ${entry_price:.2f}\n"
+        f"&#128176; Exit        : ${exit_price:.2f}\n"
+        f"&#128290; Qty         : {quantity} shares\n"
+        f"&#128201; Loss        : <b>-${loss:.2f}</b>\n"
+        f"&#128201; Daily Loss  : {daily_losses}/2"
+        f"{warning_en}"
+        "\n&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
+        f"&#x062e;&#x0633;&#x0627;&#x0631;&#x0629; | -${loss:.2f} | &#x062e;&#x0633;&#x0627;&#x0626;&#x0631; &#x0627;&#x0644;&#x064a;&#x0648;&#x0645;: {daily_losses}/2"
         f"{warning_ar}"
     )
     return _send(msg)
