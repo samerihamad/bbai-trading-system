@@ -1,11 +1,10 @@
 # =============================================================
 # reporter.py -- التقارير اليومية وتتبع الأداء
-# التخزين: Google Sheets (دائم) + logs محلية (مؤقتة)
+# التخزين: Render Disk (مجلد دائم لا يُمسح عند إعادة التشغيل)
 # =============================================================
 
 import json
 import os
-import time
 from datetime import datetime, date, timedelta
 from dataclasses import dataclass, asdict
 import pytz
@@ -16,15 +15,7 @@ from notifier import notify_daily_report
 TZ = pytz.timezone(TIMEZONE)
 
 # -----------------------------------------
-# إعداد Google Sheets
-# -----------------------------------------
-SHEET_ID        = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
-SHEET_NAME      = "Trades"
-SUMMARY_SHEET   = "Daily Summary"
-CREDENTIALS_ENV = "GOOGLE_CREDENTIALS_JSON"  # متغير بيئة في Render
-
-# -----------------------------------------
-# مسار التخزين المحلي (احتياطي)
+# مسار التخزين على Render Disk
 # -----------------------------------------
 DISK_PATH = os.getenv("RENDER_DISK_PATH", "logs")
 LOGS_DIR  = os.path.join(DISK_PATH, "trades")
@@ -36,63 +27,6 @@ def _ensure_logs_dir():
 
 def _log_file(target_date: str) -> str:
     return os.path.join(LOGS_DIR, f"trades_{target_date}.json")
-
-
-# -----------------------------------------
-# تهيئة Google Sheets Client
-# -----------------------------------------
-
-def _get_sheets_client():
-    """يُنشئ Google Sheets client من credentials."""
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-
-        scopes = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive",
-        ]
-
-        # أولاً: من Environment Variable (Render)
-        creds_json = os.getenv(CREDENTIALS_ENV)
-        if creds_json:
-            import json as json_mod
-            creds_dict = json_mod.loads(creds_json)
-            creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        else:
-            # ثانياً: من ملف محلي (للتطوير)
-            creds = Credentials.from_service_account_file(
-                "bbai-489218-bca75c7e5d12.json", scopes=scopes
-            )
-
-        return gspread.authorize(creds)
-
-    except ImportError:
-        print("⚠️  gspread غير مثبت — pip install gspread google-auth")
-        return None
-    except Exception as e:
-        print(f"⚠️  فشل الاتصال بـ Google Sheets: {e}")
-        return None
-
-
-def _get_or_create_worksheet(gc, sheet_id: str, title: str, headers: list) -> object:
-    """يجلب أو ينشئ worksheet بالعنوان المطلوب."""
-    try:
-        spreadsheet = gc.open_by_key(sheet_id)
-        try:
-            ws = spreadsheet.worksheet(title)
-        except Exception:
-            ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(headers))
-            ws.append_row(headers, value_input_option="RAW")
-            # تنسيق الصف الأول
-            ws.format("1:1", {
-                "textFormat": {"bold": True},
-                "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
-            })
-        return ws
-    except Exception as e:
-        print(f"⚠️  خطأ في Google Sheets worksheet: {e}")
-        return None
 
 
 # -----------------------------------------
@@ -119,12 +53,10 @@ class TradeRecord:
 
 
 # -----------------------------------------
-# 1. حفظ الصفقة — محلياً + Google Sheets
+# 1. حفظ وتحميل السجلات
 # -----------------------------------------
 
 def save_trade(record: TradeRecord):
-    """يحفظ الصفقة محلياً (احتياطي) وفي Google Sheets."""
-    # ── حفظ محلي
     _ensure_logs_dir()
     today    = date.today().isoformat()
     log_path = _log_file(today)
@@ -132,75 +64,14 @@ def save_trade(record: TradeRecord):
     trades.append(asdict(record))
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(trades, f, ensure_ascii=False, indent=2)
-    print(f"Trade saved locally: {log_path}")
-
-    # ── حفظ في Google Sheets
-    _save_to_sheets(record)
+    print(f"Trade saved: {log_path}")
 
 
-def _save_to_sheets(record: TradeRecord):
-    """يُضيف صف جديد في Google Sheets لكل صفقة مكتملة."""
-    gc = _get_sheets_client()
-    if not gc:
-        return
-
-    headers = [
-        "Date", "Time (EST)", "Ticker", "Side", "Strategy",
-        "Entry", "Exit", "Qty", "Stop Loss", "Target",
-        "P&L ($)", "R", "Outcome", "Exit Reason", "Risk ($)"
-    ]
-
-    ws = _get_or_create_worksheet(gc, SHEET_ID, SHEET_NAME, headers)
-    if not ws:
-        return
-
-    try:
-        closed_dt = datetime.fromisoformat(record.closed_at)
-        row = [
-            closed_dt.strftime("%Y-%m-%d"),
-            closed_dt.strftime("%H:%M EST"),
-            record.ticker,
-            record.side.upper(),
-            record.strategy,
-            record.entry_price,
-            record.exit_price,
-            record.quantity,
-            record.stop_loss,
-            record.target,
-            record.pnl,
-            record.r_achieved,
-            record.outcome.upper(),
-            record.exit_reason,
-            record.risk_amount,
-        ]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-
-        # تلوين الصف بناءً على النتيجة
-        last_row = len(ws.get_all_values())
-        if record.outcome == "win":
-            ws.format(f"A{last_row}:O{last_row}", {
-                "backgroundColor": {"red": 0.85, "green": 0.95, "blue": 0.85}
-            })
-        else:
-            ws.format(f"A{last_row}:O{last_row}", {
-                "backgroundColor": {"red": 0.95, "green": 0.85, "blue": 0.85}
-            })
-
-        print(f"✅ صفقة {record.ticker} حُفظت في Google Sheets")
-
-    except Exception as e:
-        print(f"⚠️  فشل حفظ الصفقة في Google Sheets: {e}")
-
-
-# -----------------------------------------
-# 2. تحميل السجلات المحلية
-# -----------------------------------------
-
-def load_today_trades() -> list:
+def load_today_trades() -> list[dict]:
     return load_trades_by_date(date.today().isoformat())
 
 
-def load_trades_by_date(target_date: str) -> list:
+def load_trades_by_date(target_date: str) -> list[dict]:
     log_path = _log_file(target_date)
     if not os.path.exists(log_path):
         return []
@@ -212,7 +83,7 @@ def load_trades_by_date(target_date: str) -> list:
         return []
 
 
-def get_all_trade_dates() -> list:
+def get_all_trade_dates() -> list[str]:
     _ensure_logs_dir()
     files = os.listdir(LOGS_DIR)
     dates = [
@@ -224,7 +95,7 @@ def get_all_trade_dates() -> list:
 
 
 # -----------------------------------------
-# 3. تسجيل الصفقات
+# 2. تسجيل الصفقات
 # -----------------------------------------
 
 def record_trade(
@@ -273,10 +144,10 @@ def record_trade(
 
 
 # -----------------------------------------
-# 4. حساب الاحصائيات
+# 3. حساب الاحصائيات
 # -----------------------------------------
 
-def calculate_daily_stats(trades: list) -> dict:
+def calculate_daily_stats(trades: list[dict]) -> dict:
     if not trades:
         return {
             "total_trades": 0, "wins": 0, "losses": 0,
@@ -307,11 +178,14 @@ def calculate_daily_stats(trades: list) -> dict:
 
 
 # -----------------------------------------
-# 5. إرسال التقرير اليومي + حفظه في Sheets
+# 4. ارسال التقرير اليومي
 # -----------------------------------------
 
-def send_daily_report(balance: float) -> bool:
-    """يجمع صفقات اليوم ويرسل تقريراً عبر Telegram ويحفظه في Sheets."""
+def send_daily_report(balance: float, open_trades: list = None) -> bool:
+    """
+    يجمع صفقات اليوم ويرسل تقريراً عبر Telegram.
+    يُستدعى مرة واحدة فقط من main.py عند اغلاق السوق.
+    """
     trades = load_today_trades()
     stats  = calculate_daily_stats(trades)
     today  = date.today().isoformat()
@@ -330,12 +204,10 @@ def send_daily_report(balance: float) -> bool:
         worst_trade=stats["worst_trade"],
         avg_win=stats["avg_win"],
         avg_loss=stats["avg_loss"],
+        open_trades=open_trades or [],
     )
 
-    # ── حفظ ملخص يومي في Sheets
-    _save_daily_summary_to_sheets(today, stats, balance)
-
-    # ── طباعة في الـ logs
+    # طباعة في الـ logs
     print("\n" + "=" * 55)
     print(f"Daily Report -- {today}")
     print("=" * 55)
@@ -354,45 +226,8 @@ def send_daily_report(balance: float) -> bool:
     return True
 
 
-def _save_daily_summary_to_sheets(today: str, stats: dict, balance: float):
-    """يحفظ ملخص اليوم في sheet منفصل."""
-    gc = _get_sheets_client()
-    if not gc:
-        return
-
-    headers = [
-        "Date", "Trades", "Wins", "Losses", "Win Rate (%)",
-        "Total P&L ($)", "Total R", "Long", "Short",
-        "Best ($)", "Worst ($)", "Balance ($)"
-    ]
-
-    ws = _get_or_create_worksheet(gc, SHEET_ID, SUMMARY_SHEET, headers)
-    if not ws:
-        return
-
-    try:
-        row = [
-            today,
-            stats["total_trades"],
-            stats["wins"],
-            stats["losses"],
-            stats["win_rate"],
-            stats["total_pnl"],
-            stats["total_r"],
-            stats["long_trades"],
-            stats["short_trades"],
-            stats["best_trade"],
-            stats["worst_trade"],
-            balance,
-        ]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        print(f"✅ ملخص اليوم {today} حُفظ في Google Sheets")
-    except Exception as e:
-        print(f"⚠️  فشل حفظ ملخص اليوم في Google Sheets: {e}")
-
-
 # -----------------------------------------
-# 6. تقرير الأداء الأسبوعي
+# 5. تقرير الاداء الاسبوعي
 # -----------------------------------------
 
 def get_weekly_stats() -> dict:
