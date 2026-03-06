@@ -484,7 +484,29 @@ def place_bracket_order(
             print(f"✅ أمر {label} {ticker} تم — ID: {order_id[:8]}...")
             return order_id
         else:
-            print(f"❌ فشل أمر {ticker}: {data.get('message', 'خطأ غير معروف')}")
+            error_msg = data.get("message", "خطأ غير معروف")
+            print(f"❌ فشل أمر {ticker}: {error_msg}")
+
+            # ── إشعار Telegram عند خطأ PDT
+            if "pattern day trading" in error_msg.lower():
+                try:
+                    from notifier import _send
+                    side_ar  = "شراء 🟢" if side == "long" else "بيع 🔴"
+                    _send(
+                        f"⛔ <b>تعذّر فتح الصفقة — قيود PDT</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n\n"
+                        f"🇬🇧 <b>English</b>\n"
+                        f"🔒 Trade blocked by Pattern Day Trading rule.\n"
+                        f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
+                        f"💡 Solution: Raise account balance above $25,000.\n\n"
+                        f"🇦🇪 <b>العربية</b>\n"
+                        f"🔒 تم حجب الصفقة بسبب قاعدة PDT.\n"
+                        f"📌 {ticker} | {side_ar} | دخول=${entry_price:.2f}\n"
+                        f"💡 الحل: ارفع رصيد الحساب فوق $25,000."
+                    )
+                except Exception:
+                    pass
+
             return None
 
     except Exception as e:
