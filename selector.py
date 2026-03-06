@@ -43,9 +43,75 @@ HEADERS = {
 @dataclass
 class SelectionResult:
     ticker:  str
-    adx:     float    # قوة الاتجاه — ADX < 25 → مناسب لـ MeanRev
-    atr_pct: float    # نسبة التقلب
+    adx:     float
+    atr_pct: float
     reason:  str
+
+
+# ─────────────────────────────────────────
+# 2. Signal Scoring System
+# ─────────────────────────────────────────
+
+def score_signal(sig: MeanRevSignal) -> float:
+    """
+    يحسب score لكل إشارة من 0 إلى 100.
+    كلما كان أعلى كلما كانت الإشارة أقوى.
+
+    المعايير:
+    ┌─────────────────────────┬────────┐
+    │ الجودة                  │ النقاط │
+    ├─────────────────────────┼────────┤
+    │ signal_quality = high   │  +30   │
+    │ liquidity_sweep         │  +25   │
+    │ RSI < 20 (تشبع شديد)   │  +20   │
+    │ RSI < 25                │  +10   │
+    │ RSI > 80 (SHORT شديد)   │  +20   │
+    │ تايم فريم 1Day          │  +10   │
+    │ تايم فريم 1Hour         │  +5    │
+    │ ADX مناسب (15-30 REV)   │  +5    │
+    │ R/R ratio جيد           │  +5    │
+    └─────────────────────────┴────────┘
+    """
+    score = 0.0
+
+    # جودة الإشارة
+    if sig.signal_quality == "high":
+        score += 30
+    if sig.liquidity_sweep:
+        score += 25
+
+    # RSI — تشبع بيعي أو شرائي
+    if sig.side == "long":
+        if sig.rsi < 20:
+            score += 20
+        elif sig.rsi < 25:
+            score += 10
+    else:
+        if sig.rsi > 80:
+            score += 20
+        elif sig.rsi > 75:
+            score += 10
+
+    # تايم فريم — الأولوية لـ 1Day
+    if "[1Day]" in sig.reason:
+        score += 10
+    elif "[1Hour]" in sig.reason:
+        score += 5
+    # 15Min = 0 (الأكثر ضوضاء)
+
+    # ADX مناسب لـ MeanRev (15-30)
+    if "MOM" not in sig.reason and 15 <= sig.adx <= 30:
+        score += 5
+
+    # R/R ratio
+    if sig.entry_price > 0 and sig.stop_loss > 0:
+        risk   = abs(sig.entry_price - sig.stop_loss)
+        reward = abs(sig.target_tp2 - sig.entry_price)
+        rr     = reward / risk if risk > 0 else 0
+        if rr >= 2.5:
+            score += 5
+
+    return round(score, 2)
 
 
 # ─────────────────────────────────────────
@@ -166,8 +232,15 @@ def apply_position_limits(
     # استبعاد الأسهم المفتوحة مسبقاً
     signals = [s for s in signals if s.ticker not in current_positions]
 
-    # ترتيب: high قبل standard، ثم Sweep
-    signals.sort(key=lambda x: (x.signal_quality != "high", not x.liquidity_sweep))
+    # ── ترتيب بالـ Score (الأعلى أولاً) — التعديل الجديد
+    signals.sort(key=lambda x: score_signal(x), reverse=True)
+
+    # طباعة الترتيب
+    print("\n📊 Signal Ranking:")
+    for i, s in enumerate(signals[:10], 1):
+        sc = score_signal(s)
+        tf = "[1Day]" if "[1Day]" in s.reason else "[1Hour]" if "[1Hour]" in s.reason else "[15Min]"
+        print(f"   #{i} {s.ticker:6s} {s.side.upper():5s} | Score={sc:.0f} | RSI={s.rsi:.1f} | {tf} | {'⭐' if s.signal_quality=='high' else ''} {'🎯' if s.liquidity_sweep else ''}")
 
     selected     = []
     add_rev_l    = 0
@@ -262,7 +335,6 @@ def run_selector(
                 ema200=ema200,
             )
             if signal.has_signal:
-                # نحوّل MomentumSignal إلى MeanRevSignal للتوحيد
                 unified = MeanRevSignal(
                     ticker=signal.ticker,
                     side=signal.side,
@@ -283,11 +355,12 @@ def run_selector(
                     liquidity_sweep=False,
                 )
                 all_signals.append(unified)
+                sc = score_signal(unified)
                 side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
                 print(
-                    f" | {side_tag} ✅ "
+                    f" | {side_tag} ✅ Score={sc:.0f} | "
                     f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | Vol={signal.volume_ratio:.1f}x | "
-                    f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
+                    f"entry=${signal.entry_price:.2f} | TP2=${signal.target_tp2:.2f}"
                 )
             else:
                 print(f" | ⏭  {signal.reason[:50]}")
@@ -300,12 +373,13 @@ def run_selector(
             )
             if signal.has_signal:
                 all_signals.append(signal)
+                sc = score_signal(signal)
                 side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
                 print(
-                    f" | {side_tag} ✅ "
+                    f" | {side_tag} ✅ Score={sc:.0f} | "
                     f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | "
                     f"Dev={(signal.entry_price - signal.vwap) / signal.vwap * 100 if signal.vwap > 0 else 0:.1f}% | "
-                    f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
+                    f"entry=${signal.entry_price:.2f} | TP2=${signal.target_tp2:.2f}"
                 )
             else:
                 short_reason = signal.reason[:50] + "..." if len(signal.reason) > 50 else signal.reason
@@ -318,11 +392,16 @@ def run_selector(
             reason=signal.reason,
         ))
 
-    # تطبيق حدود المراكز
+    # تطبيق حدود المراكز (مرتبة بالـ Score)
     filtered_signals = apply_position_limits(all_signals, current_positions)
 
-    print("─" * 55)
-    print(f"✅ إشارات متاحة: {len(all_signals)} | بعد تطبيق الحدود: {len(filtered_signals)}")
+    print("─" * 60)
+    print(f"✅ إشارات متاحة: {len(all_signals)} | مختارة بعد Score+Limits: {len(filtered_signals)}")
+    if filtered_signals:
+        print("🏆 الإشارات المختارة:")
+        for s in filtered_signals:
+            sc = score_signal(s)
+            print(f"   ✅ {s.ticker:6s} {s.side.upper():5s} | Score={sc:.0f} | entry=${s.entry_price:.2f} | TP2=${s.target_tp2:.2f}")
 
     return {
         "meanrev": filtered_signals,
