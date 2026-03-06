@@ -16,10 +16,18 @@ from config import (
     MAX_LONG,
     MAX_SHORT,
     MAX_TOTAL,
+    MAX_MEANREV_LONG,
+    MAX_MEANREV_SHORT,
+    MAX_MOMENTUM_LONG,
+    MAX_MOMENTUM_SHORT,
 )
 from strategy_meanrev import (
     analyze as meanrev_analyze,
     MeanRevSignal,
+)
+from strategy_momentum import (
+    analyze as momentum_analyze,
+    MomentumSignal,
 )
 
 HEADERS = {
@@ -143,40 +151,55 @@ def apply_position_limits(
     current_positions: dict,
 ) -> list[MeanRevSignal]:
     """
-    يُصفّي الإشارات بناءً على حدود المراكز:
-    - MAX_LONG  = 2 صفقة شراء كحد أقصى
-    - MAX_SHORT = 1 صفقة بيع على المكشوف كحد أقصى
-    - MAX_TOTAL = 3 مراكز إجمالية كحد أقصى
-
-    current_positions: {symbol: side} للمراكز المفتوحة حالياً
+    يُصفّي الإشارات بناءً على حصة كل استراتيجية:
+    MeanRev  : MAX_MEANREV_LONG=2  | MAX_MEANREV_SHORT=1
+    Momentum : MAX_MOMENTUM_LONG=1 | MAX_MOMENTUM_SHORT=1
+    الإجمالي : MAX_TOTAL=5
     """
-    open_longs  = sum(1 for s in current_positions.values() if s == "long")
-    open_shorts = sum(1 for s in current_positions.values() if s == "short")
-    open_total  = len(current_positions)
+    # المراكز المفتوحة حالياً حسب الاستراتيجية
+    open_rev_long   = sum(1 for t in current_positions.values() if t == ("long",  "meanrev"))
+    open_rev_short  = sum(1 for t in current_positions.values() if t == ("short", "meanrev"))
+    open_mom_long   = sum(1 for t in current_positions.values() if t == ("long",  "momentum"))
+    open_mom_short  = sum(1 for t in current_positions.values() if t == ("short", "momentum"))
+    open_total      = len(current_positions)
 
     # استبعاد الأسهم المفتوحة مسبقاً
     signals = [s for s in signals if s.ticker not in current_positions]
 
-    # ترتيب حسب الجودة: high قبل standard
+    # ترتيب: high قبل standard، ثم Sweep
     signals.sort(key=lambda x: (x.signal_quality != "high", not x.liquidity_sweep))
 
-    selected      = []
-    added_longs   = 0
-    added_shorts  = 0
+    selected     = []
+    add_rev_l    = 0
+    add_rev_s    = 0
+    add_mom_l    = 0
+    add_mom_s    = 0
 
     for sig in signals:
         if open_total + len(selected) >= MAX_TOTAL:
             break
 
+        is_momentum = "MOM" in sig.reason
+
         if sig.side == "long":
-            if open_longs + added_longs < MAX_LONG:
-                selected.append(sig)
-                added_longs += 1
+            if is_momentum:
+                if open_mom_long + add_mom_l < MAX_MOMENTUM_LONG:
+                    selected.append(sig)
+                    add_mom_l += 1
+            else:
+                if open_rev_long + add_rev_l < MAX_MEANREV_LONG:
+                    selected.append(sig)
+                    add_rev_l += 1
 
         elif sig.side == "short":
-            if open_shorts + added_shorts < MAX_SHORT:
-                selected.append(sig)
-                added_shorts += 1
+            if is_momentum:
+                if open_mom_short + add_mom_s < MAX_MOMENTUM_SHORT:
+                    selected.append(sig)
+                    add_mom_s += 1
+            else:
+                if open_rev_short + add_rev_s < MAX_MEANREV_SHORT:
+                    selected.append(sig)
+                    add_rev_s += 1
 
     return selected
 
@@ -224,27 +247,69 @@ def run_selector(
         adx     = calculate_adx(df)
         atr_pct = calculate_atr_pct(df)
 
-        print(f"  {ticker:6s} | ADX={adx:5.1f} | ATR={atr_pct:.1%}", end="")
+        # ── التصنيف: أي استراتيجية أنسب لهذا السهم؟
+        # ADX < 30 → سوق عرضي → MeanRev
+        # ADX ≥ 30 → اتجاه قوي → Momentum
+        use_momentum = adx >= 30
 
-        signal = meanrev_analyze(
-            ticker=ticker,
-            ema_above=ema_above,
-            exchange=exchange,
-            ema200=ema200,
-        )
+        strategy_tag = "MOM" if use_momentum else "REV"
+        print(f"  {ticker:6s} | ADX={adx:5.1f} | ATR={atr_pct:.1%} | [{strategy_tag}]", end="")
 
-        if signal.has_signal:
-            all_signals.append(signal)
-            side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-            print(
-                f" | {side_tag} ✅ "
-                f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | "
-                f"Dev={(signal.entry_price - signal.vwap) / signal.vwap * 100 if signal.vwap > 0 else 0:.1f}% | "
-                f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
+        if use_momentum:
+            signal = momentum_analyze(
+                ticker=ticker,
+                exchange=exchange,
+                ema200=ema200,
             )
+            if signal.has_signal:
+                # نحوّل MomentumSignal إلى MeanRevSignal للتوحيد
+                unified = MeanRevSignal(
+                    ticker=signal.ticker,
+                    side=signal.side,
+                    has_signal=True,
+                    reason=signal.reason,
+                    entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    target_tp1=signal.target_tp1,
+                    target_tp2=signal.target_tp2,
+                    trail_step=signal.trail_step,
+                    rsi=signal.rsi,
+                    atr=signal.atr,
+                    atr_pct=signal.atr_pct,
+                    vwap=signal.vwap,
+                    adx=signal.adx,
+                    ema200=ema200,
+                    signal_quality=signal.signal_quality,
+                    liquidity_sweep=False,
+                )
+                all_signals.append(unified)
+                side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+                print(
+                    f" | {side_tag} ✅ "
+                    f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | Vol={signal.volume_ratio:.1f}x | "
+                    f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
+                )
+            else:
+                print(f" | ⏭  {signal.reason[:50]}")
         else:
-            short_reason = signal.reason[:50] + "..." if len(signal.reason) > 50 else signal.reason
-            print(f" | ⏭  {short_reason}")
+            signal = meanrev_analyze(
+                ticker=ticker,
+                ema_above=ema_above,
+                exchange=exchange,
+                ema200=ema200,
+            )
+            if signal.has_signal:
+                all_signals.append(signal)
+                side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+                print(
+                    f" | {side_tag} ✅ "
+                    f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | "
+                    f"Dev={(signal.entry_price - signal.vwap) / signal.vwap * 100 if signal.vwap > 0 else 0:.1f}% | "
+                    f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
+                )
+            else:
+                short_reason = signal.reason[:50] + "..." if len(signal.reason) > 50 else signal.reason
+                print(f" | ⏭  {short_reason}")
 
         summary.append(SelectionResult(
             ticker=ticker,
