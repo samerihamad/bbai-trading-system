@@ -238,12 +238,12 @@ def run_selector(
             side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
             print(
                 f" | {side_tag} ✅ "
-                f"entry=${signal.entry_price:.2f} | "
-                f"TP1=${signal.target_tp1:.2f} | "
-                f"TP2=${signal.target_tp2:.2f}"
+                f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | "
+                f"Dev={(signal.entry_price - signal.vwap) / signal.vwap * 100 if signal.vwap > 0 else 0:.1f}% | "
+                f"entry=${signal.entry_price:.2f} | TP1=${signal.target_tp1:.2f} | TP2=${signal.target_tp2:.2f}"
             )
         else:
-            short_reason = signal.reason[:45] + "..." if len(signal.reason) > 45 else signal.reason
+            short_reason = signal.reason[:50] + "..." if len(signal.reason) > 50 else signal.reason
             print(f" | ⏭  {short_reason}")
 
         summary.append(SelectionResult(
