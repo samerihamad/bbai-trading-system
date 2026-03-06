@@ -476,15 +476,13 @@ def cancel_order(order_id: str) -> bool:
 # ─────────────────────────────────────────
 
 def open_meanrev_trade(
-    signal:  MeanRevSignal,
-    balance: float,
+    signal:   MeanRevSignal,
+    balance:  float,
+    strategy: str = "meanrev",
 ) -> Optional[OpenTrade]:
     """
     يفتح صفقة LONG أو SHORT مع خروج مزدوج TP1/TP2.
-    - TP1 عند 1R: يخرج 50% من الكمية + ينقل الوقف إلى التعادل
-    - TP2 عند 3R: يخرج الـ 50% المتبقية
-    - Trailing Stop يُفعَّل بعد TP1
-    - رافعة مالية × 2
+    strategy: 'meanrev' أو 'momentum'
     """
     sizing = calculate_position_size(
         balance=balance,
@@ -497,17 +495,17 @@ def open_meanrev_trade(
     tp1_qty   = max(1, total_qty // 2)
     tp2_qty   = total_qty - tp1_qty
 
-    side_label = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-    quality    = getattr(signal, "signal_quality", "standard").upper()
+    side_label    = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+    quality       = getattr(signal, "signal_quality", "standard").upper()
+    strategy_label = "زخم" if strategy == "momentum" else "ارتداد"
 
-    print(f"\n📤 فتح صفقة ارتداد — {signal.ticker} {side_label} [{quality}]")
+    print(f"\n📤 فتح صفقة {strategy_label} — {signal.ticker} {side_label} [{quality}]")
     print(f"   الكمية الكلية : {total_qty}")
     print(f"   TP1 ({tp1_qty} سهم) : ${signal.target_tp1:.2f} (1R)")
     print(f"   TP2 ({tp2_qty} سهم) : ${signal.target_tp2:.2f} (3R)")
     print(f"   وقف الخسارة   : ${signal.stop_loss:.2f}")
     print(f"   المخاطرة       : ${sizing['risk_amount']} | رافعة ×{sizing['leverage']}")
 
-    # Bracket Order للـ TP1 فقط (نصف الكمية)
     order_id = place_bracket_order(
         ticker=signal.ticker,
         quantity=tp1_qty,
@@ -522,7 +520,7 @@ def open_meanrev_trade(
 
     return OpenTrade(
         ticker=signal.ticker,
-        strategy="meanrev",
+        strategy=strategy,
         side=signal.side,
         order_id=order_id,
         entry_price=signal.entry_price,
