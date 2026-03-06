@@ -55,6 +55,7 @@ class MeanRevSignal:
     atr_pct:         float = 0.0
     vwap:            float = 0.0
     ema200:          float = 0.0
+    adx:             float = 0.0
     signal_quality:  str   = "standard"
     liquidity_sweep: bool  = False
 
@@ -110,6 +111,25 @@ def calc_vwap(df: pd.DataFrame) -> float:
     vwap    = (typical * df["volume"]).sum() / df["volume"].sum()
     return round(float(vwap) if not pd.isna(vwap) else 0.0, 4)
 
+def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
+    """يحسب ADX — قوة الاتجاه. < 25 = سوق عرضي مناسب لـ MeanRev."""
+    if len(df) < period * 2 + 1:
+        return 0.0
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    up_move   = high.diff()
+    down_move = -low.diff()
+    plus_dm  = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+    atr_s    = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di  = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean()  / atr_s.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_s.replace(0, np.nan))
+    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx      = dx.ewm(alpha=1/period, adjust=False).mean()
+    val      = adx.iloc[-1]
+    return round(float(val) if not pd.isna(val) else 0.0, 2)
+
 def update_trailing_stop(current_price: float, current_stop: float, trail_step: float) -> float:
     new_stop = current_price - trail_step
     return round(max(new_stop, current_stop), 4)
@@ -150,22 +170,39 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
     rsi     = calc_rsi(df["close"])
     atr     = calc_atr(df)
     vwap    = calc_vwap(df)
+    adx     = calc_adx(df)
     atr_pct = atr / price if price > 0 else 0
+    vwap_dev = (price - vwap) / vwap if vwap > 0 else 0
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, ema200=ema200)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
 
+    # ── فلتر 1: ATR
     if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
         return no_signal(f"ATR خارج النطاق: {atr_pct:.1%}")
+
+    # ── فلتر 2: RSI تشبع بيعي
     if rsi >= S2_RSI_OVERSOLD:
         return no_signal(f"RSI={rsi:.1f} (ليس تشبع)")
-    if vwap > 0:
-        vwap_dev = (price - vwap) / vwap
-        if vwap_dev > S2_VWAP_MIN_DEV:
-            return no_signal(f"السعر بعيد عن VWAP: {vwap_dev:.1%}")
 
+    # ── فلتر 3: ADX — نرفض الاتجاهات القوية جداً (> 35)
+    # نستخدم 35 وليس 25 لأننا نريد مرونة في السوق الحالي
+    if adx > 35:
+        return no_signal(f"ADX={adx:.1f} (اتجاه قوي — رفض LONG)")
+
+    # ── فلتر 4: VWAP
+    if vwap > 0 and vwap_dev > S2_VWAP_MIN_DEV:
+        return no_signal(f"السعر بعيد عن VWAP: {vwap_dev:.1%}")
+
+    # ── فلتر 5: السعر تحت EMA200 بكثير (اتجاه هابط طويل الأمد) — تحذير
+    # نسمح بالدخول لكن فقط إذا كان RSI < 25 (تشبع شديد) أو Sweep مؤكد
     sweep_long      = check_liquidity_sweep_long(df)
+    below_ema_far   = ema200 > 0 and price < ema200 * 0.97  # أكثر من 3% تحت EMA200
+
+    if below_ema_far and rsi >= S2_RSI_HIGH_QUALITY and not sweep_long:
+        return no_signal(f"سعر تحت EMA200 بـ>{((ema200-price)/ema200*100):.1f}% ورسي={rsi:.1f} — ضعيف")
+
     is_high_quality = rsi < S2_RSI_HIGH_QUALITY or sweep_long
     quality         = "high" if is_high_quality else "standard"
 
@@ -174,10 +211,16 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
     tp2   = round(price + atr * S2_TP2_R, 2)
     trail = round(atr * 0.5, 4)
 
-    return MeanRevSignal(ticker=ticker, side="long", has_signal=True, reason="LONG ✅",
+    reason = (
+        f"LONG ✅ | RSI={rsi:.1f} | ADX={adx:.1f} | Dev={vwap_dev:.1%}"
+        + (" | Sweep 🎯" if sweep_long else "")
+        + (" | جودة عالية ⭐" if is_high_quality else "")
+    )
+
+    return MeanRevSignal(ticker=ticker, side="long", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_long)
+                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_long)
 
 # ─────────────────────────────────────────
 # 4. التحليل الرئيسي المحسن - SHORT
@@ -195,11 +238,12 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float) 
     rsi     = calc_rsi(df["close"])
     atr     = calc_atr(df)
     vwap    = calc_vwap(df)
+    adx     = calc_adx(df)
     atr_pct = atr / price if price > 0 else 0
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="short", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, ema200=ema200)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
 
     # ── الفلاتر الأساسية
     if not SHORT_ENABLED:
@@ -249,7 +293,7 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float) 
     return MeanRevSignal(ticker=ticker, side="short", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short)
+                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short)
 
 # ─────────────────────────────────────────
 # 5. الدالة الرئيسية
