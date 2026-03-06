@@ -63,19 +63,37 @@ class MeanRevSignal:
 # 1. جلب البيانات وحساب المؤشرات
 # ─────────────────────────────────────────
 
-def fetch_bars(ticker: str, days: int = HISTORY_BARS) -> pd.DataFrame:
+def fetch_bars(ticker: str, timeframe: str = "1Day", days: int = HISTORY_BARS) -> pd.DataFrame:
+    """
+    يجلب الشموع بأي تايم فريم.
+    timeframe: '1Day' | '1Hour' | '15Min'
+    """
+    # عدد الأيام المطلوبة حسب التايم فريم
+    lookback = {
+        "1Day":  days + 30,
+        "1Hour": 10,       # آخر 10 أيام تكفي للـ 1H
+        "15Min": 5,        # آخر 5 أيام تكفي للـ 15Min
+    }.get(timeframe, days + 30)
+
     end   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = (datetime.utcnow() - timedelta(days=days + 30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.utcnow() - timedelta(days=lookback)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # عدد الشموع المطلوبة
+    bar_limit = {
+        "1Day":  days,
+        "1Hour": 120,   # آخر 120 شمعة ساعية
+        "15Min": 200,   # آخر 200 شمعة 15 دقيقة
+    }.get(timeframe, days)
 
     try:
         response = requests.get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
             headers=HEADERS,
             params={
-                "timeframe": "1Day",
+                "timeframe": timeframe,
                 "start":     start,
                 "end":       end,
-                "limit":     days,
+                "limit":     bar_limit,
                 "feed":      "iex",
             },
             timeout=15,
@@ -88,7 +106,7 @@ def fetch_bars(ticker: str, days: int = HISTORY_BARS) -> pd.DataFrame:
         df["time"] = pd.to_datetime(df["t"])
         return df.sort_values("time").reset_index(drop=True)
     except Exception as e:
-        print(f"❌ خطأ في جلب بيانات {ticker}: {e}")
+        print(f"❌ خطأ في جلب بيانات {ticker} [{timeframe}]: {e}")
         return pd.DataFrame()
 
 def calc_rsi(closes: pd.Series, period: int = S2_RSI_PERIOD) -> float:
@@ -130,6 +148,81 @@ def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
     val      = adx.iloc[-1]
     return round(float(val) if not pd.isna(val) else 0.0, 2)
 
+
+def check_volatility_expansion(df: pd.DataFrame, period: int = 20) -> tuple[bool, float]:
+    """
+    التعديل 2: Volatility Expansion Filter
+    يتحقق إذا كان ATR الحالي أكبر من متوسط ATR — السوق بدأ يتحرك.
+    يُرجع (is_expanding, ratio) حيث ratio = ATR_current / ATR_avg
+    """
+    if len(df) < period + 2:
+        return True, 1.0  # نسمح بالمرور إذا البيانات غير كافية
+
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    atr_series  = tr.rolling(14).mean()
+    atr_current = float(atr_series.iloc[-1])
+    atr_avg     = float(atr_series.iloc[-period:-1].mean())
+
+    if atr_avg <= 0:
+        return True, 1.0
+
+    ratio = round(atr_current / atr_avg, 2)
+    # Expansion: ATR الحالي أكبر من 80% من المتوسط (مرونة)
+    return ratio >= 0.8, ratio
+
+
+def check_liquidity_heatmap_long(df: pd.DataFrame, lookback: int = 20) -> bool:
+    """
+    التعديل 3: Liquidity Heatmap — Stop Hunt تحت Low 20
+    يبحث عن: كسر أدنى Low خلال آخر 20 شمعة ثم الإغلاق فوقه.
+    هذا يعني: السوق امتص وقف الخسارة تحت القاع ثم انعكس صعوداً.
+    """
+    if not LIQUIDITY_SWEEP_ENABLED or len(df) < lookback + 2:
+        return False
+
+    curr_low   = df["low"].iloc[-1]
+    curr_close = df["close"].iloc[-1]
+    curr_vol   = df["volume"].iloc[-1]
+
+    # أدنى قاع خلال آخر 20 شمعة (ما عدا الأخيرة)
+    low_20     = df["low"].iloc[-lookback-1:-1].min()
+    avg_vol    = df["volume"].iloc[-lookback-1:-1].mean()
+
+    # الشرط: كسر القاع + إغلاق فوقه + حجم مرتفع
+    swept      = curr_low < low_20 and curr_close > low_20
+    vol_confirm = curr_vol > avg_vol * 1.3
+
+    return swept and vol_confirm
+
+
+def check_liquidity_heatmap_short(df: pd.DataFrame, lookback: int = 20) -> bool:
+    """
+    التعديل 3: Liquidity Heatmap — Stop Hunt فوق High 20
+    يبحث عن: كسر أعلى High خلال آخر 20 شمعة ثم الإغلاق تحته.
+    هذا يعني: السوق امتص وقف الخسارة فوق القمة ثم انعكس هبوطاً.
+    """
+    if not LIQUIDITY_SWEEP_ENABLED or len(df) < lookback + 2:
+        return False
+
+    curr_high  = df["high"].iloc[-1]
+    curr_close = df["close"].iloc[-1]
+    curr_vol   = df["volume"].iloc[-1]
+
+    # أعلى قمة خلال آخر 20 شمعة (ما عدا الأخيرة)
+    high_20    = df["high"].iloc[-lookback-1:-1].max()
+    avg_vol    = df["volume"].iloc[-lookback-1:-1].mean()
+
+    swept      = curr_high > high_20 and curr_close < high_20
+    vol_confirm = curr_vol > avg_vol * 1.3
+
+    return swept and vol_confirm
+
 def update_trailing_stop(current_price: float, current_stop: float, trail_step: float) -> float:
     new_stop = current_price - trail_step
     return round(max(new_stop, current_stop), 4)
@@ -142,37 +235,29 @@ def refresh_allowed_tickers(candidate_tickers: list):
 # ─────────────────────────────────────────
 
 def check_liquidity_sweep_long(df: pd.DataFrame) -> bool:
-    if not LIQUIDITY_SWEEP_ENABLED or len(df) < 20: return False
-    prev_low, curr_low, curr_close = df["low"].iloc[-2], df["low"].iloc[-1], df["close"].iloc[-1]
-    return curr_low < prev_low and curr_close > prev_low
+    """استخدام Heatmap 20 — أقوى من prev شمعة واحدة."""
+    return check_liquidity_heatmap_long(df, lookback=20)
 
 def check_liquidity_sweep_short(df: pd.DataFrame) -> bool:
-    """تحقق من اختراق القمة الكاذب مع تأكيد حجم التداول."""
-    if not LIQUIDITY_SWEEP_ENABLED or len(df) < 20: return False
+    """استخدام Heatmap 20 — أقوى من prev شمعة واحدة."""
+    return check_liquidity_heatmap_short(df, lookback=20)
 
-    curr_high  = df["high"].iloc[-1]
-    curr_close = df["close"].iloc[-1]
-    curr_vol   = df["volume"].iloc[-1]
-    prev_high  = df["high"].iloc[-2]
-    avg_volume = df["volume"].iloc[-21:-1].mean()
-
-    is_sweep       = curr_high > prev_high and curr_close < prev_high
-    is_volume_high = curr_vol > (avg_volume * 1.2)
-
-    return is_sweep and is_volume_high
 
 # ─────────────────────────────────────────
 # 3. التحليل الرئيسي - LONG
 # ─────────────────────────────────────────
 
-def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float) -> MeanRevSignal:
-    price   = df["close"].iloc[-1]
-    rsi     = calc_rsi(df["close"])
-    atr     = calc_atr(df)
-    vwap    = calc_vwap(df)
-    adx     = calc_adx(df)
-    atr_pct = atr / price if price > 0 else 0
+def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float, timeframe: str = "1Day") -> MeanRevSignal:
+    price    = df["close"].iloc[-1]
+    rsi      = calc_rsi(df["close"])
+    atr      = calc_atr(df)
+    vwap     = calc_vwap(df)
+    adx      = calc_adx(df)
+    atr_pct  = atr / price if price > 0 else 0
     vwap_dev = (price - vwap) / vwap if vwap > 0 else 0
+    vol_expanding, vol_ratio = check_volatility_expansion(df)
+
+    tf_tag = f"[{timeframe}]"
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason=reason,
@@ -186,8 +271,7 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
     if rsi >= S2_RSI_OVERSOLD:
         return no_signal(f"RSI={rsi:.1f} (ليس تشبع)")
 
-    # ── فلتر 3: ADX — نرفض الاتجاهات القوية جداً (> 35)
-    # نستخدم 35 وليس 25 لأننا نريد مرونة في السوق الحالي
+    # ── فلتر 3: ADX
     if adx > 35:
         return no_signal(f"ADX={adx:.1f} (اتجاه قوي — رفض LONG)")
 
@@ -195,10 +279,13 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
     if vwap > 0 and vwap_dev > S2_VWAP_MIN_DEV:
         return no_signal(f"السعر بعيد عن VWAP: {vwap_dev:.1%}")
 
-    # ── فلتر 5: السعر تحت EMA200 بكثير (اتجاه هابط طويل الأمد) — تحذير
-    # نسمح بالدخول لكن فقط إذا كان RSI < 25 (تشبع شديد) أو Sweep مؤكد
-    sweep_long      = check_liquidity_sweep_long(df)
-    below_ema_far   = ema200 > 0 and price < ema200 * 0.97  # أكثر من 3% تحت EMA200
+    # ── فلتر 5: Volatility Expansion — التعديل 2
+    if not vol_expanding:
+        return no_signal(f"Volatility منخفض ({vol_ratio:.2f}x) — السوق راكد")
+
+    # ── فلتر 6: EMA200
+    sweep_long    = check_liquidity_sweep_long(df)
+    below_ema_far = ema200 > 0 and price < ema200 * 0.97
 
     if below_ema_far and rsi >= S2_RSI_HIGH_QUALITY and not sweep_long:
         return no_signal(f"سعر تحت EMA200 بـ>{((ema200-price)/ema200*100):.1f}% ورسي={rsi:.1f} — ضعيف")
@@ -212,9 +299,9 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
     trail = round(atr * 0.5, 4)
 
     reason = (
-        f"LONG ✅ | RSI={rsi:.1f} | ADX={adx:.1f} | Dev={vwap_dev:.1%}"
-        + (" | Sweep 🎯" if sweep_long else "")
-        + (" | جودة عالية ⭐" if is_high_quality else "")
+        f"LONG ✅ {tf_tag} | RSI={rsi:.1f} | ADX={adx:.1f} | Dev={vwap_dev:.1%} | Vol={vol_ratio:.2f}x"
+        + (" | Sweep🎯" if sweep_long else "")
+        + (" | ⭐عالي" if is_high_quality else "")
     )
 
     return MeanRevSignal(ticker=ticker, side="long", has_signal=True, reason=reason,
@@ -226,68 +313,58 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float)
 # 4. التحليل الرئيسي المحسن - SHORT
 # ─────────────────────────────────────────
 
-# قيمة RSI المستقلة لجودة إشارة SHORT (تشبع شرائي شديد)
-S2_RSI_HIGH_QUALITY_SHORT = 80  # RSI فوق 80 = جودة عالية للـ SHORT
+S2_RSI_HIGH_QUALITY_SHORT = 80
 
-def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float) -> MeanRevSignal:
+def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float, timeframe: str = "1Day") -> MeanRevSignal:
     price      = df["close"].iloc[-1]
     prev_close = df["close"].iloc[-2]
     open_price = df["open"].iloc[-1]
     high_price = df["high"].iloc[-1]
 
-    rsi     = calc_rsi(df["close"])
-    atr     = calc_atr(df)
-    vwap    = calc_vwap(df)
-    adx     = calc_adx(df)
-    atr_pct = atr / price if price > 0 else 0
+    rsi      = calc_rsi(df["close"])
+    atr      = calc_atr(df)
+    vwap     = calc_vwap(df)
+    adx      = calc_adx(df)
+    atr_pct  = atr / price if price > 0 else 0
+    vol_expanding, vol_ratio = check_volatility_expansion(df)
+    tf_tag   = f"[{timeframe}]"
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="short", has_signal=False, reason=reason,
                              rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
 
-    # ── الفلاتر الأساسية
     if not SHORT_ENABLED:
         return no_signal("SHORT غير مفعّل")
     if exchange not in SHORT_EXCHANGES:
         return no_signal("بورصة غير مدعومة")
     if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
         return no_signal(f"ATR غير مناسب: {atr_pct:.1%}")
-
-    # ── 1. فلتر RSI إلزامي
     if rsi <= S2_RSI_OVERBOUGHT:
         return no_signal(f"RSI={rsi:.1f} (ليس تشبع شرائي)")
+    if not vol_expanding:
+        return no_signal(f"Volatility منخفض ({vol_ratio:.2f}x) — السوق راكد")
 
-    # ── 2. فلتر انحراف VWAP (1.5% كحد أدنى)
-    vwap_dev = (price - vwap) / vwap if vwap > 0 else 0
-
-    # ── 3. تأكيد الشمعة السلبية
+    vwap_dev          = (price - vwap) / vwap if vwap > 0 else 0
     is_bearish_action = price < open_price and price < prev_close
+    sweep_short       = check_liquidity_sweep_short(df)
 
-    # ── 4. Liquidity Sweep المطور (مع Volume)
-    sweep_short = check_liquidity_sweep_short(df)
-
-    # ── قرار الدخول
     if not is_bearish_action:
         return no_signal("بانتظار تأكيد شمعة سلبية")
     if vwap_dev < 0.015 and not sweep_short:
         return no_signal(f"الانحراف عن VWAP ضئيل ({vwap_dev:.1%}) ولا يوجد Sweep")
 
-    # ── حساب المستويات
-    stop_lvl = max(high_price, price + (atr * S2_STOP_ATR_MULT))
-    stop     = round(stop_lvl, 2)
-    tp1      = round(price - (atr * S2_TP1_R), 2)
-    tp2      = round(price - (atr * S2_TP2_R), 2)
-    trail    = round(atr * 0.4, 4)
-
-    # ── جودة الإشارة — مستقلة عن LONG
-    # HIGH: RSI فوق 80 (تشبع شرائي شديد) + تحت EMA200 (اتجاه هابط) أو Sweep مؤكد
+    stop_lvl        = max(high_price, price + (atr * S2_STOP_ATR_MULT))
+    stop            = round(stop_lvl, 2)
+    tp1             = round(price - (atr * S2_TP1_R), 2)
+    tp2             = round(price - (atr * S2_TP2_R), 2)
+    trail           = round(atr * 0.4, 4)
     is_high_quality = (rsi >= S2_RSI_HIGH_QUALITY_SHORT) and (price < ema200 or sweep_short)
     quality         = "high" if is_high_quality else "standard"
 
     reason = (
-        f"SHORT ✅ | RSI={rsi:.1f} | Dev={vwap_dev:.1%}"
-        + (" | Sweep 🎯" if sweep_short else "")
-        + (" | جودة عالية ⭐" if is_high_quality else "")
+        f"SHORT ✅ {tf_tag} | RSI={rsi:.1f} | Dev={vwap_dev:.1%} | Vol={vol_ratio:.2f}x"
+        + (" | Sweep🎯" if sweep_short else "")
+        + (" | ⭐عالي" if is_high_quality else "")
     )
 
     return MeanRevSignal(ticker=ticker, side="short", has_signal=True, reason=reason,
@@ -296,18 +373,35 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float) 
                          adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short)
 
 # ─────────────────────────────────────────
-# 5. الدالة الرئيسية
+# 5. الدالة الرئيسية — Multi-Timeframe
 # ─────────────────────────────────────────
 
 def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema200: float = 0.0) -> MeanRevSignal:
-    df = fetch_bars(ticker)
-    min_bars = max(50, S2_RSI_PERIOD * 3)
+    """
+    يحلل السهم على 3 تايم فريمات بالترتيب:
+    1Day → 1Hour → 15Min
+    يُرجع أول إشارة صالحة يجدها.
+    الأولوية لـ 1Day (أقوى) ثم 1Hour ثم 15Min (أكثر).
+    """
+    timeframes = [
+        ("1Day",  max(50, S2_RSI_PERIOD * 3)),
+        ("1Hour", 30),
+        ("15Min", 30),
+    ]
 
-    if df.empty or len(df) < min_bars:
-        return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason="بيانات غير كافية")
+    for tf, min_bars in timeframes:
+        df = fetch_bars(ticker, timeframe=tf)
 
-    long_signal = _analyze_long(ticker, df, ema_above, ema200)
-    if long_signal.has_signal:
-        return long_signal
+        if df.empty or len(df) < min_bars:
+            continue
 
-    return _analyze_short(ticker, df, exchange, ema200)
+        long_signal = _analyze_long(ticker, df, ema_above, ema200, timeframe=tf)
+        if long_signal.has_signal:
+            return long_signal
+
+        short_signal = _analyze_short(ticker, df, exchange, ema200, timeframe=tf)
+        if short_signal.has_signal:
+            return short_signal
+
+    # لا توجد إشارة على أي تايم فريم
+    return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason="لا إشارة على 1D/1H/15M")
