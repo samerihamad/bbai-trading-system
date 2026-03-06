@@ -24,6 +24,7 @@ from config import (
 from strategy_meanrev import (
     analyze as meanrev_analyze,
     MeanRevSignal,
+    calc_adx as calculate_adx,
 )
 from strategy_momentum import (
     analyze as momentum_analyze,
@@ -154,41 +155,6 @@ def fetch_daily_bars(ticker: str, days: int = 30) -> pd.DataFrame:
 # ─────────────────────────────────────────
 # 2. حساب مؤشرات الفحص السريع
 # ─────────────────────────────────────────
-
-def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
-    """
-    يحسب ADX — قوة الاتجاه.
-    ADX < 25 → سوق عرضي ← مثالي لاستراتيجية MeanRev
-    ADX > 25 → اتجاه قوي ← يُعامَل بحذر
-    """
-    if len(df) < period + 1:
-        return 0.0
-
-    high  = df["high"]
-    low   = df["low"]
-    close = df["close"]
-
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low  - prev_close).abs(),
-    ], axis=1).max(axis=1)
-
-    up_move   = high.diff()
-    down_move = -low.diff()
-
-    plus_dm  = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
-
-    atr      = tr.rolling(period).mean()
-    plus_di  = 100 * (plus_dm.rolling(period).mean()  / atr.replace(0, np.nan))
-    minus_di = 100 * (minus_dm.rolling(period).mean() / atr.replace(0, np.nan))
-    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx      = dx.rolling(period).mean()
-
-    val = adx.iloc[-1]
-    return round(float(val) if not pd.isna(val) else 0.0, 2)
 
 
 def calculate_atr_pct(df: pd.DataFrame, period: int = 14) -> float:
