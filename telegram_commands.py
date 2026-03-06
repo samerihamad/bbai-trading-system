@@ -223,15 +223,62 @@ def _handle_command(command: str, context: dict):
         else:
             system_state._pending_closeall = False
             try:
-                from executor import close_all_positions
-                success = close_all_positions()
-                # مسح الصفقات من الذاكرة
+                from executor import close_all_positions, get_current_price, _delete_open_trades_sheets
+                from notifier import notify_trade_win, notify_trade_loss
+
                 context_data = context() if callable(context) else context
                 open_trades  = context_data.get("open_trades", [])
+                risk_manager = context_data.get("risk_manager")
+
+                # ── حساب P&L لكل صفقة قبل الإغلاق
+                for trade in list(open_trades):
+                    try:
+                        current_price = get_current_price(trade.ticker)
+                        if current_price <= 0:
+                            current_price = trade.entry_price
+
+                        if trade.side == "long":
+                            pnl = (current_price - trade.entry_price) * trade.quantity
+                        else:
+                            pnl = (trade.entry_price - current_price) * trade.quantity
+
+                        pnl = round(pnl, 2)
+                        risk = getattr(trade, "risk_amount", 0)
+                        r_multiple = round(pnl / risk, 2) if risk > 0 else 0.0
+
+                        if pnl >= 0:
+                            if risk_manager:
+                                risk_manager.daily_wins += 1
+                            notify_trade_win(
+                                ticker=trade.ticker,
+                                side=trade.side,
+                                entry=trade.entry_price,
+                                exit_price=current_price,
+                                pnl=pnl,
+                                r_multiple=r_multiple,
+                                exit_reason="Manual /closeall",
+                            )
+                        else:
+                            if risk_manager:
+                                risk_manager.record_loss()
+                            notify_trade_loss(
+                                ticker=trade.ticker,
+                                side=trade.side,
+                                entry=trade.entry_price,
+                                exit_price=current_price,
+                                pnl=pnl,
+                                r_multiple=r_multiple,
+                                exit_reason="Manual /closeall",
+                            )
+                    except Exception as e:
+                        _send(f"⚠️ خطأ في حساب P&L لـ {trade.ticker}: {e}")
+
+                # ── إغلاق كل المراكز في Alpaca
+                success = close_all_positions()
+
+                # ── مسح الذاكرة و Sheets
                 open_trades.clear()
-                # مسح Google Sheets
                 try:
-                    from executor import _delete_open_trades_sheets
                     _delete_open_trades_sheets()
                 except Exception:
                     pass
