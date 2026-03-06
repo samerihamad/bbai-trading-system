@@ -180,13 +180,22 @@ def run_pre_market():
     log("=== PRE-MARKET ROUTINE START ===")
     risk_manager.reset()
 
-    try:
-        daily_stocks = get_daily_universe()
-        refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
-    except Exception as e:
-        log(f"Error in get_daily_universe: {e}")
-        traceback.print_exc()
-        daily_stocks = {}
+    # ── محاولة جلب الأسهم مع retry ×3
+    for attempt in range(1, 4):
+        try:
+            daily_stocks = get_daily_universe()
+            if daily_stocks:
+                refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
+                break
+            else:
+                log(f"⚠️ get_daily_universe رجع فارغ — محاولة {attempt}/3")
+        except Exception as e:
+            log(f"❌ خطأ في get_daily_universe (محاولة {attempt}/3): {e}")
+            traceback.print_exc()
+            daily_stocks = {}
+
+        if attempt < 3:
+            time.sleep(10)
 
     if daily_stocks:
         try:
@@ -195,7 +204,20 @@ def run_pre_market():
             log(f"Telegram error: {e}")
         log(f"Universe ready: {len(daily_stocks)} stocks selected")
     else:
-        log("WARNING: No stocks selected today")
+        log("❌ CRITICAL: فشل تحميل الأسهم بعد 3 محاولات")
+        try:
+            from notifier import _send
+            _send(
+                "⚠️ <b>تحذير — فشل تحميل قائمة الأسهم</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🇬🇧 Failed to load stock universe after 3 attempts.\n"
+                "The system will retry at next pre-market cycle.\n\n"
+                "🇦🇪 فشل تحميل قائمة الأسهم بعد 3 محاولات.\n"
+                "النظام سيحاول مجدداً في الدورة القادمة.\n"
+                "💡 تحقق من Alpaca API أو اضغط /resume لإعادة المحاولة."
+            )
+        except Exception:
+            pass
 
     _pre_market_done = True
     log("=== PRE-MARKET ROUTINE END ===")
@@ -536,6 +558,10 @@ def main():
                 elif daily_stocks:
                     monitor_open_trades()
                     scan_for_signals()
+                elif _pre_market_done and not daily_stocks:
+                    # فشل تحميل الأسهم سابقاً — نعيد المحاولة كل 5 دقائق
+                    log("⚠️ Universe فارغ — إعادة المحاولة...")
+                    _pre_market_done = False  # يسمح بإعادة run_pre_market
                 else:
                     log("No universe -- waiting for pre-market routine")
 
