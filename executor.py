@@ -579,9 +579,14 @@ def open_meanrev_trade(
     """
     يفتح صفقة LONG أو SHORT مع خروج مزدوج TP1/TP2.
     strategy: 'meanrev' أو 'momentum'
+
+    يفتح أمرين منفصلين في Alpaca:
+    - أمر 1 (tp1_qty): bracket مع TP1 و SL
+    - أمر 2 (tp2_qty): bracket مع TP2 و SL
+    هذا يضمن حماية الـ 50% الثانية حتى لو توقف السيرفر.
     """
-    account   = get_account()
-    balance   = account.get("balance", balance) if account else balance
+    account      = get_account()
+    balance      = account.get("balance", balance) if account else balance
     buying_power = account.get("buying_power", 0) if account else 0
 
     sizing = calculate_position_size(
@@ -596,8 +601,8 @@ def open_meanrev_trade(
     tp1_qty   = max(1, total_qty // 2)
     tp2_qty   = total_qty - tp1_qty
 
-    side_label    = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-    quality       = getattr(signal, "signal_quality", "standard").upper()
+    side_label     = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+    quality        = getattr(signal, "signal_quality", "standard").upper()
     strategy_label = "زخم" if strategy == "momentum" else "ارتداد"
 
     print(f"\n📤 فتح صفقة {strategy_label} — {signal.ticker} {side_label} [{quality}]")
@@ -607,7 +612,8 @@ def open_meanrev_trade(
     print(f"   وقف الخسارة   : ${signal.stop_loss:.2f}")
     print(f"   المخاطرة       : ${sizing['risk_amount']} | رافعة ×{sizing['leverage']}")
 
-    order_id = place_bracket_order(
+    # ── أمر 1: tp1_qty مع هدف TP1
+    order_id_1 = place_bracket_order(
         ticker=signal.ticker,
         quantity=tp1_qty,
         entry_price=signal.entry_price,
@@ -615,15 +621,30 @@ def open_meanrev_trade(
         target=signal.target_tp1,
         side=signal.side,
     )
-
-    if not order_id:
+    if not order_id_1:
         return None
+
+    # ── أمر 2: tp2_qty مع هدف TP2 — يضمن حماية النصف الثاني حتى لو توقف السيرفر
+    order_id_2 = place_bracket_order(
+        ticker=signal.ticker,
+        quantity=tp2_qty,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        target=signal.target_tp2,
+        side=signal.side,
+    )
+    if not order_id_2:
+        # لو فشل الأمر الثاني — نكمل لكن نسجل تحذير
+        print(f"⚠️  فشل أمر TP2 لـ {signal.ticker} — النصف الثاني بدون حماية Alpaca")
+
+    print(f"   ✅ أمر TP1: {order_id_1[:8] if order_id_1 else 'N/A'}...")
+    print(f"   ✅ أمر TP2: {order_id_2[:8] if order_id_2 else 'فشل'}...")
 
     return OpenTrade(
         ticker=signal.ticker,
         strategy=strategy,
         side=signal.side,
-        order_id=order_id,
+        order_id=order_id_1,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         target=signal.target_tp2,
@@ -702,12 +723,21 @@ def monitor_trade(trade: OpenTrade) -> dict:
         return {"status": "target", "price": current_price,
                 "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
 
-    # ── Trailing Stop (يُفعَّل بعد TP1 فقط للـ LONG)
-    if trade.side == "long" and trade.tp1_hit and trade.trail_step > 0:
-        new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
-        if new_stop > trade.stop_loss:
-            return {"status": "trail_updated", "price": current_price,
-                    "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+    # ── Trailing Stop (يُفعَّل بعد TP1 للـ LONG والـ SHORT)
+    if trade.tp1_hit and trade.trail_step > 0:
+        if trade.side == "long":
+            new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
+            if new_stop > trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+        elif trade.side == "short":
+            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
+            new_stop = trade.stop_loss - trade.trail_step
+            if current_price < trade.stop_loss - trade.trail_step:
+                new_stop = current_price + trade.trail_step
+                if new_stop < trade.stop_loss:
+                    return {"status": "trail_updated", "price": current_price,
+                            "r": r_current, "new_stop": new_stop, "exit_qty": 0}
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
