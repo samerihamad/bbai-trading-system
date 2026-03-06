@@ -116,9 +116,14 @@ def is_market_hours() -> bool:
 
 
 def is_close_time() -> bool:
+    """
+    يُرجع True فقط في نافذة إغلاق السوق: 15:45 → 16:05
+    بعد 16:05 يُرجع False لتجنب إرسال التقرير عند كل Deploy.
+    """
     if not is_weekday():
         return False
-    return get_ny_time().strftime("%H:%M") > MARKET_CLOSE
+    t = get_ny_time().strftime("%H:%M")
+    return MARKET_CLOSE <= t <= "16:05"
 
 
 def check_new_day():
