@@ -198,6 +198,13 @@ def apply_position_limits(
     # استبعاد الأسهم المفتوحة مسبقاً
     signals = [s for s in signals if s.ticker not in current_positions]
 
+    # ── رفض الإشارات ضعيفة الجودة (Score < 10)
+    MIN_SCORE = 10
+    rejected_weak = [s for s in signals if score_signal(s) < MIN_SCORE]
+    signals       = [s for s in signals if score_signal(s) >= MIN_SCORE]
+    if rejected_weak:
+        print(f"  ⛔ رُفض {len(rejected_weak)} إشارة Score < {MIN_SCORE}: {[s.ticker for s in rejected_weak]}")
+
     # ── ترتيب بالـ Score (الأعلى أولاً) — التعديل الجديد
     signals.sort(key=lambda x: score_signal(x), reverse=True)
 
