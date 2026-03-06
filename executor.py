@@ -22,8 +22,9 @@ from risk import calculate_position_size, calculate_r
 # ─────────────────────────────────────────
 # Google Sheets — حفظ الصفقات المفتوحة
 # ─────────────────────────────────────────
-SHEET_ID          = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
-OPEN_TRADES_SHEET = "Open Trades"
+SHEET_ID           = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
+OPEN_TRADES_SHEET  = "Open Trades"
+CLOSED_TRADES_SHEET = "Closed Trades"
 CREDENTIALS_ENV   = "GOOGLE_CREDENTIALS_JSON"
 
 
@@ -102,6 +103,79 @@ def _delete_open_trades_sheets() -> None:
         print("✅ تم مسح Open Trades من Google Sheets")
     except Exception as e:
         print(f"⚠️  فشل مسح Open Trades: {e}")
+
+
+# ─────────────────────────────────────────
+# Closed Trades — Google Sheets
+# ─────────────────────────────────────────
+
+CLOSED_HEADERS = [
+    "date", "ticker", "strategy", "side",
+    "entry_price", "exit_price", "quantity",
+    "stop_loss", "target", "risk_amount",
+    "pnl", "r_achieved", "outcome",
+    "exit_reason", "opened_at", "closed_at",
+]
+
+def _get_closed_trades_ws():
+    gc = _get_sheets_client()
+    if not gc:
+        return None
+    try:
+        ss = gc.open_by_key(SHEET_ID)
+        try:
+            return ss.worksheet(CLOSED_TRADES_SHEET)
+        except Exception:
+            ws = ss.add_worksheet(title=CLOSED_TRADES_SHEET, rows=1000, cols=len(CLOSED_HEADERS))
+            ws.append_row(CLOSED_HEADERS)
+            return ws
+    except Exception as e:
+        print(f"⚠️  فشل جلب Closed Trades worksheet: {e}")
+        return None
+
+
+def save_closed_trade_sheets(record: dict) -> None:
+    """يحفظ صفقة مكتملة في Google Sheets — يُستدعى من reporter.py."""
+    ws = _get_closed_trades_ws()
+    if not ws:
+        return
+    try:
+        from datetime import date
+        row = [
+            date.today().isoformat(),
+            record.get("ticker", ""),
+            record.get("strategy", ""),
+            record.get("side", ""),
+            record.get("entry_price", 0),
+            record.get("exit_price", 0),
+            record.get("quantity", 0),
+            record.get("stop_loss", 0),
+            record.get("target", 0),
+            record.get("risk_amount", 0),
+            record.get("pnl", 0),
+            record.get("r_achieved", 0),
+            record.get("outcome", ""),
+            record.get("exit_reason", ""),
+            record.get("opened_at", ""),
+            record.get("closed_at", ""),
+        ]
+        ws.append_row(row, value_input_option="RAW")
+        print(f"✅ صفقة {record.get('ticker')} حُفظت في Closed Trades Sheets")
+    except Exception as e:
+        print(f"⚠️  فشل حفظ Closed Trade في Sheets: {e}")
+
+
+def load_closed_trades_by_date_sheets(target_date: str) -> list[dict]:
+    """يجلب صفقات يوم معين من Google Sheets."""
+    ws = _get_closed_trades_ws()
+    if not ws:
+        return []
+    try:
+        rows = ws.get_all_records()
+        return [r for r in rows if str(r.get("date", "")) == target_date]
+    except Exception as e:
+        print(f"⚠️  فشل جلب Closed Trades من Sheets: {e}")
+        return []
 
 
 def _load_open_trades_from_sheets() -> list:
