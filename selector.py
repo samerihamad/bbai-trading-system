@@ -320,76 +320,82 @@ def run_selector(
         adx     = calculate_adx(df)
         atr_pct = calculate_atr_pct(df)
 
-        # ── التصنيف: أي استراتيجية أنسب لهذا السهم؟
-        # ADX < 30 → سوق عرضي → MeanRev
-        # ADX ≥ 30 → اتجاه قوي → Momentum
-        use_momentum = adx >= 30
+        print(f"  {ticker:6s} | ADX={adx:5.1f} | ATR={atr_pct:.1%}", end="")
 
-        strategy_tag = "MOM" if use_momentum else "REV"
-        print(f"  {ticker:6s} | ADX={adx:5.1f} | ATR={atr_pct:.1%} | [{strategy_tag}]", end="")
+        # ── تشغيل الاستراتيجيتين على كل سهم
+        candidates = []
 
-        if use_momentum:
-            signal = momentum_analyze(
-                ticker=ticker,
-                exchange=exchange,
+        # 1. MeanRev
+        rev_signal = meanrev_analyze(
+            ticker=ticker,
+            ema_above=ema_above,
+            exchange=exchange,
+            ema200=ema200,
+        )
+        if rev_signal.has_signal:
+            candidates.append(rev_signal)
+
+        # 2. Momentum — نحوّله لـ MeanRevSignal للتوحيد
+        mom_raw = momentum_analyze(
+            ticker=ticker,
+            exchange=exchange,
+            ema200=ema200,
+        )
+        if mom_raw.has_signal:
+            mom_unified = MeanRevSignal(
+                ticker=mom_raw.ticker,
+                side=mom_raw.side,
+                has_signal=True,
+                reason=mom_raw.reason,
+                entry_price=mom_raw.entry_price,
+                stop_loss=mom_raw.stop_loss,
+                target_tp1=mom_raw.target_tp1,
+                target_tp2=mom_raw.target_tp2,
+                trail_step=mom_raw.trail_step,
+                rsi=mom_raw.rsi,
+                atr=mom_raw.atr,
+                atr_pct=mom_raw.atr_pct,
+                vwap=mom_raw.vwap,
+                adx=mom_raw.adx,
                 ema200=ema200,
+                signal_quality=mom_raw.signal_quality,
+                liquidity_sweep=False,
             )
-            if signal.has_signal:
-                unified = MeanRevSignal(
-                    ticker=signal.ticker,
-                    side=signal.side,
-                    has_signal=True,
-                    reason=signal.reason,
-                    entry_price=signal.entry_price,
-                    stop_loss=signal.stop_loss,
-                    target_tp1=signal.target_tp1,
-                    target_tp2=signal.target_tp2,
-                    trail_step=signal.trail_step,
-                    rsi=signal.rsi,
-                    atr=signal.atr,
-                    atr_pct=signal.atr_pct,
-                    vwap=signal.vwap,
-                    adx=signal.adx,
-                    ema200=ema200,
-                    signal_quality=signal.signal_quality,
-                    liquidity_sweep=False,
-                )
-                all_signals.append(unified)
-                sc = score_signal(unified)
-                side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-                print(
-                    f" | {side_tag} ✅ Score={sc:.0f} | "
-                    f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | Vol={signal.volume_ratio:.1f}x | "
-                    f"entry=${signal.entry_price:.2f} | TP2=${signal.target_tp2:.2f}"
-                )
-            else:
-                print(f" | ⏭  {signal.reason[:50]}")
+            candidates.append(mom_unified)
+
+        # ── اختيار الأفضل Score من بين الاستراتيجيتين
+        if not candidates:
+            # لا توجد إشارة من أي استراتيجية
+            last_reason = rev_signal.reason if not rev_signal.has_signal else mom_raw.reason
+            print(f" | ⏭  {last_reason[:50]}")
+        elif len(candidates) == 1:
+            # استراتيجية واحدة أعطت إشارة
+            best = candidates[0]
+            all_signals.append(best)
+            sc       = score_signal(best)
+            tag      = "MOM" if "MOM" in best.reason else "REV"
+            side_tag = "🟢 LONG" if best.side == "long" else "🔴 SHORT"
+            print(f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}")
         else:
-            signal = meanrev_analyze(
-                ticker=ticker,
-                ema_above=ema_above,
-                exchange=exchange,
-                ema200=ema200,
+            # كلتا الاستراتيجيتين أعطتا إشارة — اختر الأعلى Score
+            best      = max(candidates, key=lambda x: score_signal(x))
+            rejected  = [c for c in candidates if c is not best][0]
+            all_signals.append(best)
+            sc        = score_signal(best)
+            sc_rej    = score_signal(rejected)
+            tag       = "MOM" if "MOM" in best.reason else "REV"
+            rej_tag   = "MOM" if "MOM" in rejected.reason else "REV"
+            side_tag  = "🟢 LONG" if best.side == "long" else "🔴 SHORT"
+            print(
+                f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}"
+                f"  ← فاز على [{rej_tag}] Score={sc_rej:.0f}"
             )
-            if signal.has_signal:
-                all_signals.append(signal)
-                sc = score_signal(signal)
-                side_tag = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
-                print(
-                    f" | {side_tag} ✅ Score={sc:.0f} | "
-                    f"RSI={signal.rsi:.1f} | ADX={signal.adx:.1f} | "
-                    f"Dev={(signal.entry_price - signal.vwap) / signal.vwap * 100 if signal.vwap > 0 else 0:.1f}% | "
-                    f"entry=${signal.entry_price:.2f} | TP2=${signal.target_tp2:.2f}"
-                )
-            else:
-                short_reason = signal.reason[:50] + "..." if len(signal.reason) > 50 else signal.reason
-                print(f" | ⏭  {short_reason}")
 
         summary.append(SelectionResult(
             ticker=ticker,
             adx=adx,
             atr_pct=atr_pct,
-            reason=signal.reason,
+            reason=rev_signal.reason if not rev_signal.has_signal else rev_signal.reason,
         ))
 
     # تطبيق حدود المراكز (مرتبة بالـ Score)
