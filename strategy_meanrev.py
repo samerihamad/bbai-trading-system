@@ -35,6 +35,18 @@ HEADERS = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
 }
 
+# ─── فلتر News Trap ───────────────────────
+# ATR على 1Day أكثر من 8% = حدث استثنائي → رفض
+NEWS_TRAP_ATR_THRESHOLD = 0.08
+
+# نستورد check_news من momentum لتجنب التكرار
+def _check_news(ticker: str) -> bool:
+    try:
+        from strategy_momentum import check_news
+        return check_news(ticker)
+    except Exception:
+        return False
+
 # ─────────────────────────────────────────
 # نموذج إشارة التداول
 # ─────────────────────────────────────────
@@ -223,6 +235,37 @@ def check_liquidity_heatmap_short(df: pd.DataFrame, lookback: int = 20) -> bool:
 
     return swept and vol_confirm
 
+def check_news_trap(ticker: str, df_1day: pd.DataFrame) -> tuple[bool, str]:
+    """
+    فلتر News Trap — يتجنب الدخول عكس خبر قوي.
+
+    الفلتر 1: ATR اليومي > 8% → حركة استثنائية = خبر محتمل
+    الفلتر 2: ATR مرتفع + خبر مؤكد → رفض قاطع
+
+    يُرجع (is_trap, reason)
+    is_trap=True  → لا تدخل الصفقة
+    is_trap=False → آمن للدخول
+    """
+    if df_1day.empty or len(df_1day) < 2:
+        return False, ""
+
+    # ── الفلتر 1: ATR اليومي
+    price       = df_1day["close"].iloc[-1]
+    atr_1day    = calc_atr(df_1day)
+    atr_1day_pct = atr_1day / price if price > 0 else 0
+
+    if atr_1day_pct > NEWS_TRAP_ATR_THRESHOLD:
+        # ── الفلتر 2: تأكيد الخبر
+        has_news = _check_news(ticker)
+        if has_news:
+            return True, f"News Trap🚫 ATR_1D={atr_1day_pct:.1%} + خبر مؤكد"
+        else:
+            # ATR مرتفع بدون خبر مؤكد — تحذير فقط، لا رفض
+            return False, f"⚠️ ATR_1D مرتفع ({atr_1day_pct:.1%}) بدون خبر"
+
+    return False, ""
+
+
 def update_trailing_stop(current_price: float, current_stop: float, trail_step: float) -> float:
     new_stop = current_price - trail_step
     return round(max(new_stop, current_stop), 4)
@@ -380,9 +423,19 @@ def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema20
     """
     يحلل السهم على 3 تايم فريمات بالترتيب:
     1Day → 1Hour → 15Min
-    يُرجع أول إشارة صالحة يجدها.
-    الأولوية لـ 1Day (أقوى) ثم 1Hour ثم 15Min (أكثر).
+    يتحقق من News Trap أولاً قبل أي تحليل.
     """
+    # ── فلتر News Trap — يجلب 1Day مرة واحدة للفحص
+    df_1day = fetch_bars(ticker, timeframe="1Day")
+
+    if not df_1day.empty:
+        is_trap, trap_reason = check_news_trap(ticker, df_1day)
+        if is_trap:
+            return MeanRevSignal(
+                ticker=ticker, side="long", has_signal=False,
+                reason=trap_reason,
+            )
+
     timeframes = [
         ("1Day",  max(50, S2_RSI_PERIOD * 3)),
         ("1Hour", 30),
@@ -390,7 +443,8 @@ def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema20
     ]
 
     for tf, min_bars in timeframes:
-        df = fetch_bars(ticker, timeframe=tf)
+        # 1Day جُلب مسبقاً — نعيد استخدامه
+        df = df_1day if tf == "1Day" else fetch_bars(ticker, timeframe=tf)
 
         if df.empty or len(df) < min_bars:
             continue
@@ -403,5 +457,4 @@ def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema20
         if short_signal.has_signal:
             return short_signal
 
-    # لا توجد إشارة على أي تايم فريم
     return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason="لا إشارة على 1D/1H/15M")
