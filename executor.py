@@ -484,11 +484,16 @@ def open_meanrev_trade(
     يفتح صفقة LONG أو SHORT مع خروج مزدوج TP1/TP2.
     strategy: 'meanrev' أو 'momentum'
     """
+    account   = get_account()
+    balance   = account.get("balance", balance) if account else balance
+    buying_power = account.get("buying_power", 0) if account else 0
+
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         use_leverage=True,
+        buying_power=buying_power,
     )
 
     total_qty = sizing["quantity"]
