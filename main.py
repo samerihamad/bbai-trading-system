@@ -64,6 +64,10 @@ risk_manager : DailyRiskManager = DailyRiskManager()
 open_trades  : list              = []
 daily_stocks : dict              = {}
 last_no_opp  : datetime          = datetime.now(TZ) - timedelta(hours=2)
+last_scan    : datetime          = datetime.now(TZ) - timedelta(hours=2)
+last_universe_refresh : datetime = datetime.now(TZ) - timedelta(hours=2)
+SCAN_INTERVAL_MIN     : int      = 5    # فحص الإشارات كل 5 دقائق
+UNIVERSE_REFRESH_MIN  : int      = 60   # تحديث قائمة الأسهم كل ساعة
 
 _pre_market_done  : bool = False
 _pre_alert_done   : bool = False
@@ -377,16 +381,47 @@ def monitor_open_trades():
 
 
 # -----------------------------------------
+# تحديث Universe كل ساعة أثناء السوق
+# -----------------------------------------
+
+def refresh_universe_if_needed():
+    global daily_stocks, last_universe_refresh
+    now  = get_ny_time()
+    mins = (now - last_universe_refresh).total_seconds() / 60
+    if mins < UNIVERSE_REFRESH_MIN:
+        return
+    try:
+        log("🔄 تحديث قائمة الأسهم (كل ساعة)...")
+        new_stocks = get_daily_universe()
+        if new_stocks:
+            daily_stocks = new_stocks
+            refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
+            last_universe_refresh = now
+            log(f"✅ تم تحديث القائمة: {len(daily_stocks)} سهم")
+        else:
+            log("⚠️ فشل تحديث القائمة — نبقى على القائمة الحالية")
+    except Exception as e:
+        log(f"❌ خطأ في تحديث Universe: {e}")
+
+
+# -----------------------------------------
 # البحث عن إشارات جديدة
 # -----------------------------------------
 
 def scan_for_signals():
-    global open_trades, last_no_opp
+    global open_trades, last_no_opp, last_scan
 
     if len(open_trades) >= MAX_TOTAL:
         return
 
+    # ── تحقق من الفترة الزمنية — لا تفحص أكثر من مرة كل 5 دقائق
+    now  = get_ny_time()
+    mins = (now - last_scan).total_seconds() / 60
+    if mins < SCAN_INTERVAL_MIN:
+        return
+
     try:
+        last_scan = now  # ← تحديث وقت آخر فحص
         account = get_account()
         if not account:
             log("Could not fetch account -- skipping scan")
@@ -557,6 +592,7 @@ def main():
                         run_pre_market()
                 elif daily_stocks:
                     monitor_open_trades()
+                    refresh_universe_if_needed()
                     scan_for_signals()
                 elif _pre_market_done and not daily_stocks:
                     # فشل تحميل الأسهم سابقاً — نعيد المحاولة كل 5 دقائق
