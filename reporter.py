@@ -1,9 +1,8 @@
 # =============================================================
 # reporter.py -- التقارير اليومية وتتبع الأداء
-# التخزين: Render Disk (مجلد دائم لا يُمسح عند إعادة التشغيل)
+# التخزين: Google Sheets (دائم — لا يُمسح عند إعادة التشغيل)
 # =============================================================
 
-import json
 import os
 from datetime import datetime, date, timedelta
 from dataclasses import dataclass, asdict
@@ -13,20 +12,6 @@ from config import TIMEZONE
 from notifier import notify_daily_report
 
 TZ = pytz.timezone(TIMEZONE)
-
-# -----------------------------------------
-# مسار التخزين على Render Disk
-# -----------------------------------------
-DISK_PATH = os.getenv("RENDER_DISK_PATH", "logs")
-LOGS_DIR  = os.path.join(DISK_PATH, "trades")
-
-
-def _ensure_logs_dir():
-    os.makedirs(LOGS_DIR, exist_ok=True)
-
-
-def _log_file(target_date: str) -> str:
-    return os.path.join(LOGS_DIR, f"trades_{target_date}.json")
 
 
 # -----------------------------------------
@@ -53,18 +38,16 @@ class TradeRecord:
 
 
 # -----------------------------------------
-# 1. حفظ وتحميل السجلات
+# 1. حفظ وتحميل السجلات — Google Sheets
 # -----------------------------------------
 
 def save_trade(record: TradeRecord):
-    _ensure_logs_dir()
-    today    = date.today().isoformat()
-    log_path = _log_file(today)
-    trades   = load_trades_by_date(today)
-    trades.append(asdict(record))
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(trades, f, ensure_ascii=False, indent=2)
-    print(f"Trade saved: {log_path}")
+    """يحفظ الصفقة في Google Sheets."""
+    try:
+        from executor import save_closed_trade_sheets
+        save_closed_trade_sheets(asdict(record))
+    except Exception as e:
+        print(f"⚠️  فشل حفظ الصفقة في Sheets: {e}")
 
 
 def load_today_trades() -> list[dict]:
@@ -72,26 +55,28 @@ def load_today_trades() -> list[dict]:
 
 
 def load_trades_by_date(target_date: str) -> list[dict]:
-    log_path = _log_file(target_date)
-    if not os.path.exists(log_path):
-        return []
+    """يجلب صفقات يوم معين من Google Sheets."""
     try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from executor import load_closed_trades_by_date_sheets
+        return load_closed_trades_by_date_sheets(target_date)
     except Exception as e:
-        print(f"Error loading trades {target_date}: {e}")
+        print(f"⚠️  فشل جلب الصفقات من Sheets: {e}")
         return []
 
 
 def get_all_trade_dates() -> list[str]:
-    _ensure_logs_dir()
-    files = os.listdir(LOGS_DIR)
-    dates = [
-        f.replace("trades_", "").replace(".json", "")
-        for f in files
-        if f.startswith("trades_") and f.endswith(".json")
-    ]
-    return sorted(dates, reverse=True)
+    """يجلب كل التواريخ المتاحة من Sheets."""
+    try:
+        from executor import _get_closed_trades_ws
+        ws = _get_closed_trades_ws()
+        if not ws:
+            return []
+        rows = ws.get_all_records()
+        dates = list({str(r.get("date", "")) for r in rows if r.get("date")})
+        return sorted(dates, reverse=True)
+    except Exception as e:
+        print(f"⚠️  فشل جلب التواريخ: {e}")
+        return []
 
 
 # -----------------------------------------
