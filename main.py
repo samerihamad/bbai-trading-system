@@ -25,10 +25,15 @@ from selector         import run_selector
 from executor         import (
     get_account,
     get_next_market_open,
+    get_current_price,
+    get_open_positions,
+    sync_with_alpaca,
     open_meanrev_trade,
     monitor_trade,
     place_market_sell,
     close_all_positions,
+    _save_open_trades,
+    _delete_open_trades_sheets,
     OpenTrade,
 )
 from strategy_meanrev import refresh_allowed_tickers
@@ -201,6 +206,18 @@ def monitor_open_trades():
     if not open_trades:
         return
 
+    # ── تحقق من التزامن مع Alpaca (يكتشف الإغلاق اليدوي)
+    before = len(open_trades)
+    sync_with_alpaca(open_trades)
+    if len(open_trades) < before:
+        if open_trades:
+            _save_open_trades(open_trades)
+        else:
+            _delete_open_trades_sheets()
+
+    if not open_trades:
+        return
+
     log(f"Monitoring {len(open_trades)} open trades...")
     trades_to_remove = []
 
@@ -325,6 +342,12 @@ def monitor_open_trades():
     for trade in trades_to_remove:
         open_trades.remove(trade)
 
+    if trades_to_remove:
+        if open_trades:
+            _save_open_trades(open_trades)
+        else:
+            _delete_open_trades_sheets()
+
 
 # -----------------------------------------
 # البحث عن إشارات جديدة
@@ -353,6 +376,7 @@ def scan_for_signals():
             trade = open_meanrev_trade(signal, balance)
             if trade:
                 open_trades.append(trade)
+                _save_open_trades(open_trades)
                 found_signal = True
                 try:
                     notify_trade_open(
@@ -398,27 +422,30 @@ def run_market_close():
     _close_done = True
 
     try:
+        # ── الصفقات المفتوحة تنتقل لليوم التالي — لا نغلقها
+        open_trades_summary = []
         if open_trades:
-            log(f"Closing {len(open_trades)} open trades...")
+            log(f"{len(open_trades)} open trade(s) will carry over to next session:")
             for trade in open_trades:
-                try:
-                    exit_qty = trade.quantity_remaining if trade.tp1_hit else trade.quantity
-                    place_market_sell(trade.ticker, exit_qty, side=trade.side)
-                    record_trade(
-                        ticker=trade.ticker, strategy=trade.strategy,
-                        entry_price=trade.entry_price, exit_price=trade.entry_price,
-                        quantity=exit_qty, stop_loss=trade.stop_loss,
-                        target=trade.target, risk_amount=trade.risk_amount,
-                        exit_reason="eod", opened_at=trade.opened_at, side=trade.side,
-                    )
-                except Exception as e:
-                    log(f"Error closing {trade.ticker}: {e}")
-            close_all_positions()
-            open_trades.clear()
+                price = get_current_price(trade.ticker)
+                if price > 0 and trade.stop_loss != trade.entry_price:
+                    if trade.side == "long":
+                        r = round((price - trade.entry_price) / abs(trade.entry_price - trade.stop_loss), 2)
+                    else:
+                        r = round((trade.entry_price - price) / abs(trade.entry_price - trade.stop_loss), 2)
+                else:
+                    r = 0.0
+                open_trades_summary.append({
+                    "ticker": trade.ticker,
+                    "side":   trade.side,
+                    "entry":  trade.entry_price,
+                    "r":      r,
+                })
+                log(f"  → {trade.ticker} [{trade.side.upper()}] entry=${trade.entry_price:.2f} | R={r:+.2f}")
 
         account = get_account()
         balance = account.get("balance", 0) if account else 0
-        send_daily_report(balance)
+        send_daily_report(balance, open_trades=open_trades_summary)
         log("Daily report sent")
 
     except Exception as e:
@@ -461,6 +488,14 @@ def main():
     # بدء الاستماع لأوامر Telegram في الخلفية
     start_command_listener(get_system_context)
     log("Telegram command listener started -- send /help for commands")
+    log("-" * 55)
+
+    # ── استعادة الصفقات المفتوحة (من Sheets أولاً، ثم Alpaca)
+    log("Checking for open positions...")
+    recovered = get_open_positions()
+    if recovered:
+        open_trades.extend(recovered)
+        log(f"Recovered {len(recovered)} open position(s) -- will monitor them")
     log("-" * 55)
 
     # الحلقة الرئيسية
