@@ -151,16 +151,25 @@ def notify_trade_win(
     quantity: int, profit: float, r_achieved: float,
 ) -> bool:
     msg = (
-        f"&#9989; <b>WIN -- {ticker}</b>\n"
-        f"&#128336; {_now()}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#128176; Entry    : ${entry_price:.2f}\n"
-        f"&#128176; Exit     : ${exit_price:.2f}\n"
-        f"&#128290; Qty      : {quantity} shares\n"
-        f"&#128200; Profit   : <b>+${profit:.2f}</b>\n"
-        f"&#127919; R        : {r_achieved:.1f}R\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#x631;&#x628;&#x62d; | +${profit:.2f}"
+        f"✅ <b>WIN -- {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇬🇧 <b>English</b>\n"
+        f"💰 Entry   : ${entry_price:.2f}\n"
+        f"💰 Exit    : ${exit_price:.2f}\n"
+        f"🔢 Qty     : {quantity} shares\n"
+        f"📈 Profit  : <b>+${profit:.2f}</b>\n"
+        f"🎯 R       : {r_achieved:.2f}R\n"
+
+        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇦🇪 <b>العربية</b>\n"
+        f"💰 الدخول  : ${entry_price:.2f}\n"
+        f"💰 الخروج  : ${exit_price:.2f}\n"
+        f"🔢 الكمية  : {quantity} سهم\n"
+        f"📈 الربح   : <b>+${profit:.2f}</b>\n"
+        f"🎯 النسبة  : {r_achieved:.2f}R\n"
     )
     return _send(msg)
 
@@ -176,21 +185,30 @@ def notify_trade_loss(
     warning_en = ""
     warning_ar = ""
     if daily_losses >= 2:
-        warning_en = "\n&#9940; <b>Daily loss limit reached -- System STOPPED</b>"
-        warning_ar = "\n&#x062a;&#x0645; &#x0627;&#x0644;&#x0648;&#x0635;&#x0648;&#x0644; &#x0644;&#x062d;&#x062f; &#x0627;&#x0644;&#x062e;&#x0633;&#x0627;&#x0626;&#x0631; -- &#x0627;&#x0644;&#x0646;&#x0638;&#x0627;&#x0645; &#x0645;&#x062a;&#x0648;&#x0642;&#x0641;"
+        warning_en = "\n⛔ <b>Daily loss limit reached -- System STOPPED</b>"
+        warning_ar = "\n⛔ <b>تم الوصول لحد الخسائر -- النظام متوقف</b>"
 
     msg = (
-        f"&#10060; <b>LOSS -- {ticker}</b>\n"
-        f"&#128336; {_now()}\n"
-        "&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#128176; Entry       : ${entry_price:.2f}\n"
-        f"&#128176; Exit        : ${exit_price:.2f}\n"
-        f"&#128290; Qty         : {quantity} shares\n"
-        f"&#128201; Loss        : <b>-${loss:.2f}</b>\n"
-        f"&#128201; Daily Loss  : {daily_losses}/2"
-        f"{warning_en}"
-        "\n&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;\n"
-        f"&#x062e;&#x0633;&#x0627;&#x0631;&#x0629; | -${loss:.2f} | &#x062e;&#x0633;&#x0627;&#x0626;&#x0631; &#x0627;&#x0644;&#x064a;&#x0648;&#x0645;: {daily_losses}/2"
+        f"❌ <b>LOSS -- {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇬🇧 <b>English</b>\n"
+        f"💰 Entry       : ${entry_price:.2f}\n"
+        f"💰 Exit        : ${exit_price:.2f}\n"
+        f"🔢 Qty         : {quantity} shares\n"
+        f"📉 Loss        : <b>-${loss:.2f}</b>\n"
+        f"📉 Daily Loss  : {daily_losses}/2"
+        f"{warning_en}\n"
+
+        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🇦🇪 <b>العربية</b>\n"
+        f"💰 الدخول       : ${entry_price:.2f}\n"
+        f"💰 الخروج       : ${exit_price:.2f}\n"
+        f"🔢 الكمية       : {quantity} سهم\n"
+        f"📉 الخسارة      : <b>-${loss:.2f}</b>\n"
+        f"📉 خسائر اليوم : {daily_losses}/2"
         f"{warning_ar}"
     )
     return _send(msg)
@@ -231,6 +249,7 @@ def notify_daily_report(
     worst_trade: float = 0.0,
     avg_win: float = 0.0,
     avg_loss: float = 0.0,
+    open_trades: list = None,
 ) -> bool:
 
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
@@ -265,8 +284,15 @@ def notify_daily_report(
             f"📉 Avg Loss : ${avg_loss:.2f}\n"
         )
 
+    msg += f"\n{bal_emoji} <b>Balance</b> : ${balance:,.2f}\n"
+
+    if open_trades:
+        msg += "\n📂 <b>Open Positions (carry over)</b>\n"
+        for t in open_trades:
+            side_emoji = "🟢" if t["side"] == "long" else "🔴"
+            msg += f"  {side_emoji} {t['ticker']} | entry=${t['entry']:.2f} | R={t['r']:+.2f}\n"
+
     msg += (
-        f"\n{bal_emoji} <b>Balance</b> : ${balance:,.2f}\n"
         "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         "🇦🇪 <b>العربية</b>\n\n"
@@ -286,6 +312,13 @@ def notify_daily_report(
         )
 
     msg += f"\n{bal_emoji} <b>الرصيد</b> : ${balance:,.2f}"
+
+    if open_trades:
+        msg += "\n\n📂 <b>صفقات مفتوحة (تنتقل لغد)</b>\n"
+        for t in open_trades:
+            side_ar    = "شراء" if t["side"] == "long" else "مكشوف"
+            side_emoji = "🟢" if t["side"] == "long" else "🔴"
+            msg += f"  {side_emoji} {t['ticker']} | {side_ar} | دخول=${t['entry']:.2f} | R={t['r']:+.2f}\n"
 
     return _send(msg)
     
