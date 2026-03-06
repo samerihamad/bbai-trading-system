@@ -163,8 +163,6 @@ def get_volume_data(assets: list) -> pd.DataFrame:
                     trade.get("p") or 0
                 )
 
-                # ── إذا كان حجم اليوم الحالي أقل من المطلوب
-                # نستخدم حجم اليوم السابق كمرجع أكثر موثوقية
                 daily_vol = float(daily.get("v") or 0)
                 prev_vol  = float(prev.get("v") or 0)
                 volume    = max(daily_vol, prev_vol)
@@ -174,12 +172,40 @@ def get_volume_data(assets: list) -> pd.DataFrame:
 
                 if volume >= MIN_AVG_VOLUME and MIN_PRICE <= last_price <= MAX_PRICE:
                     info = asset_map.get(symbol, {})
+
+                    # ── Volatility Ranking: نحسب حركة اليوم %
+                    daily_open  = float(daily.get("o") or last_price)
+                    daily_high  = float(daily.get("h") or last_price)
+                    daily_low   = float(daily.get("l") or last_price)
+                    prev_close  = float(prev.get("c") or last_price)
+
+                    # نسبة التغيير عن إغلاق أمس
+                    change_pct  = abs(last_price - prev_close) / prev_close if prev_close > 0 else 0
+
+                    # نطاق اليوم كنسبة من السعر (Intraday Range)
+                    intraday_range = (daily_high - daily_low) / last_price if last_price > 0 else 0
+
+                    # مضاعف الحجم عن المعتاد (Volume Spike)
+                    vol_spike = daily_vol / prev_vol if prev_vol > 0 else 1.0
+
+                    # Score الإجمالي للحركة — كلما كان أعلى كلما كان السهم أكثر حركة
+                    volatility_score = round(
+                        (change_pct * 0.4) +
+                        (intraday_range * 0.4) +
+                        (min(vol_spike, 5.0) / 5.0 * 0.2),  # نحدد vol_spike بـ 5x
+                        6
+                    )
+
                     results.append({
-                        "symbol":         symbol,
-                        "exchange":       info.get("exchange", ""),
-                        "easy_to_borrow": info.get("easy_to_borrow", True),
-                        "avg_volume":     volume,
-                        "last_price":     last_price,
+                        "symbol":           symbol,
+                        "exchange":         info.get("exchange", ""),
+                        "easy_to_borrow":   info.get("easy_to_borrow", True),
+                        "avg_volume":       volume,
+                        "last_price":       last_price,
+                        "change_pct":       round(change_pct, 4),
+                        "intraday_range":   round(intraday_range, 4),
+                        "vol_spike":        round(vol_spike, 2),
+                        "volatility_score": volatility_score,
                     })
 
             except Exception:
@@ -191,7 +217,13 @@ def get_volume_data(assets: list) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(results)
-    return df.sort_values("avg_volume", ascending=False).reset_index(drop=True)
+    # ترتيب بـ volatility_score أولاً — الأكثر حركة في المقدمة
+    # ثم avg_volume كمعيار ثانوي للسيولة
+    df = df.sort_values(
+        ["volatility_score", "avg_volume"],
+        ascending=[False, False]
+    ).reset_index(drop=True)
+    return df
 
 
 # ─────────────────────────────────────────
@@ -283,14 +315,24 @@ def get_daily_universe() -> dict:
         ema200 = ema_map.get(symbol, 0.0)
 
         result[symbol] = {
-            "ema_above":      price > ema200 if ema200 else True,
-            "exchange":       row["exchange"],
-            "easy_to_borrow": row["easy_to_borrow"],
-            "last_price":     price,
-            "avg_volume":     int(row["avg_volume"]),
-            "ema200":         ema200,
+            "ema_above":        price > ema200 if ema200 else True,
+            "exchange":         row["exchange"],
+            "easy_to_borrow":   row["easy_to_borrow"],
+            "last_price":       price,
+            "avg_volume":       int(row["avg_volume"]),
+            "ema200":           ema200,
+            "change_pct":       row.get("change_pct", 0.0),
+            "intraday_range":   row.get("intraday_range", 0.0),
+            "vol_spike":        row.get("vol_spike", 1.0),
+            "volatility_score": row.get("volatility_score", 0.0),
         }
 
-    print(f"✅ Selected {len(result)} stocks for Mean Reversion")
+    # طباعة أعلى 10 أسهم حركةً
+    top10 = sorted(result.items(), key=lambda x: x[1].get("volatility_score", 0), reverse=True)[:10]
+    print("🔥 Top 10 Movers:")
+    for sym, info in top10:
+        print(f"   {sym:6s} | Δ={info['change_pct']:.1%} | Range={info['intraday_range']:.1%} | VolSpike={info['vol_spike']:.1f}x")
+
+    print(f"✅ Selected {len(result)} stocks (sorted by volatility)")
 
     return result
