@@ -365,7 +365,7 @@ def scan_for_signals():
             log("Could not fetch account -- skipping scan")
             return
 
-        current_positions = {t.ticker: t.side for t in open_trades}
+        current_positions = {t.ticker: (t.side, t.strategy) for t in open_trades}
         balance           = account["balance"]
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
@@ -373,7 +373,9 @@ def scan_for_signals():
         for signal in results.get("meanrev", []):
             if not risk_manager.can_trade():
                 break
-            trade = open_meanrev_trade(signal, balance)
+            # تحديد الاستراتيجية من الـ reason
+            strategy = "momentum" if "MOM" in signal.reason else "meanrev"
+            trade = open_meanrev_trade(signal, balance, strategy=strategy)
             if trade:
                 open_trades.append(trade)
                 _save_open_trades(open_trades)
