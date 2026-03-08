@@ -65,6 +65,7 @@ class MeanRevSignal:
     adx:             float = 0.0
     signal_quality:  str   = "standard"
     liquidity_sweep: bool  = False
+    timeframe:       str   = "1Day"
 
 # ─────────────────────────────────────────
 # 1. جلب البيانات وحساب المؤشرات
@@ -299,7 +300,8 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float,
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx,
+                             ema200=ema200, timeframe=timeframe)
 
     # ── فلتر 1: ATR
     if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
@@ -345,7 +347,8 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float,
     return MeanRevSignal(ticker=ticker, side="long", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_long)
+                         adx=adx, ema200=ema200, signal_quality=quality,
+                         liquidity_sweep=sweep_long, timeframe=timeframe)
 
 # ─────────────────────────────────────────
 # 4. التحليل الرئيسي المحسن - SHORT
@@ -369,7 +372,8 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float, 
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="short", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx,
+                             ema200=ema200, timeframe=timeframe)
 
     if not SHORT_ENABLED:
         return no_signal("SHORT غير مفعّل")
@@ -408,7 +412,8 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float, 
     return MeanRevSignal(ticker=ticker, side="short", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short)
+                         adx=adx, ema200=ema200, signal_quality=quality,
+                         liquidity_sweep=sweep_short, timeframe=timeframe)
 
 # ─────────────────────────────────────────
 # 5. الدالة الرئيسية — Multi-Timeframe
