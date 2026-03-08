@@ -7,6 +7,7 @@ from config import (
     MAX_DAILY_LOSSES,
     STRATEGY2_LEVERAGE,
     PROFIT_FACTOR_CUT,
+    SLIPPAGE_PER_SHARE,
 )
 
 
@@ -44,9 +45,15 @@ def calculate_position_size(
     if risk_per_share == 0:
         raise ValueError("سعر الدخول ووقف الخسارة متساويان — لا يمكن حساب الحجم")
 
+    # ── تعديل risk_per_share ليشمل تكلفة التنفيذ الفعلي (Slippage)
+    # دخول: السعر الفعلي أسوأ بـ SLIPPAGE_PER_SHARE
+    # خروج: نفس الشيء — المجموع = 2 × SLIPPAGE
+    # هذا يُقلل الكمية قليلاً → حماية من المبالغة في حجم الصفقة
+    risk_per_share_real = risk_per_share + (SLIPPAGE_PER_SHARE * 2)
+
     leverage    = STRATEGY2_LEVERAGE if use_leverage else 1.0
     risk_amount = balance * RISK_PER_TRADE
-    quantity    = int((risk_amount * leverage) / risk_per_share)
+    quantity    = int((risk_amount * leverage) / risk_per_share_real)
 
     if quantity <= 0:
         quantity = 1
@@ -77,18 +84,32 @@ def calculate_r(
     side:        str = "long",
 ) -> float:
     """
-    يحسب كم R حققت الصفقة.
-    مثال LONG:  دخلت 100، وقف 95، خرجت 110 → R = +2.0
-    مثال SHORT: دخلت 100، وقف 105، خرجت 90  → R = +2.0
+    يحسب كم R حققت الصفقة بعد خصم Slippage.
+
+    Slippage يُطبَّق على السعرين:
+    LONG  : دخول أغلى بـ SLIPPAGE ← خروج أرخص بـ SLIPPAGE
+    SHORT : دخول أرخص بـ SLIPPAGE ← خروج أغلى بـ SLIPPAGE
+
+    مثال LONG:  entry=100، stop=95، exit=110، slippage=0.02
+      entry_adj = 100.02 | exit_adj = 109.98
+      R = (109.98 - 100.02) / (100.02 - 95) = 9.96 / 5.02 = +1.98R  ← أدق من +2.0R
     """
-    risk_per_share = abs(entry_price - stop_loss)
+    # ── تعديل الأسعار بالـ Slippage
+    if side == "long":
+        entry_adj = entry_price + SLIPPAGE_PER_SHARE   # دفعت أكثر عند الدخول
+        exit_adj  = exit_price  - SLIPPAGE_PER_SHARE   # استلمت أقل عند الخروج
+    else:
+        entry_adj = entry_price - SLIPPAGE_PER_SHARE   # بعت بأقل عند الدخول
+        exit_adj  = exit_price  + SLIPPAGE_PER_SHARE   # دفعت أكثر عند التغطية
+
+    risk_per_share = abs(entry_adj - stop_loss)
     if risk_per_share <= 0:
         return 0.0
 
     if side == "long":
-        return round((exit_price - entry_price) / risk_per_share, 2)
+        return round((exit_adj - entry_adj) / risk_per_share, 2)
     else:
-        return round((entry_price - exit_price) / risk_per_share, 2)
+        return round((entry_adj - exit_adj) / risk_per_share, 2)
 
 
 # ─────────────────────────────────────────
