@@ -3,13 +3,13 @@
 # الإصدار: 2.0 (تحسين جودة الـ SHORT و Liquidity Sweep)
 # =============================================================
 
-import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
 
+from universe import _safe_get
 from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
@@ -29,11 +29,6 @@ from config import (
     SHORT_EXCHANGES,
     HISTORY_BARS,
 )
-
-HEADERS = {
-    "APCA-API-KEY-ID":      ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-}
 
 # ─── فلتر News Trap ───────────────────────
 # ATR على 1Day أكثر من 8% = حدث استثنائي → رفض
@@ -98,18 +93,18 @@ def fetch_bars(ticker: str, timeframe: str = "1Day", days: int = HISTORY_BARS) -
     }.get(timeframe, days)
 
     try:
-        response = requests.get(
+        response = _safe_get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
-            headers=HEADERS,
-            params={
+            {
                 "timeframe": timeframe,
                 "start":     start,
                 "end":       end,
                 "limit":     bar_limit,
                 "feed":      "iex",
             },
-            timeout=15,
         )
+        if not response:
+            return pd.DataFrame()
         bars = response.json().get("bars", [])
         if not bars: return pd.DataFrame()
 
