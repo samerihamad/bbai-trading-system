@@ -31,6 +31,13 @@ REQUEST_TIMEOUT = 20
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5
 
+# ─────────────────────────────────────────
+# Feed State — يتذكر أي feed نجح لهذه الجلسة
+# ─────────────────────────────────────────
+# القيم الممكنة: "iex" | "sip" | None (بلا feed)
+# يُضبط تلقائياً عند أول طلب ناجح ويُستخدم في كل الطلبات التالية
+_working_feed: str | None = "iex"   # نبدأ بـ iex كافتراض
+
 
 # ─────────────────────────────────────────
 # 1. Safe Request Wrapper
@@ -39,42 +46,76 @@ RETRY_DELAY     = 1.5
 def _safe_get(url: str, params: dict) -> requests.Response | None:
     """
     Production request wrapper:
-    - Retry ×3
-    - Exponential backoff
-    - Feed fallback if 403
-    - Clean logging (no JSON spam)
+    - يتذكر أي feed نجح (_working_feed) ويُعيد استخدامه
+    - عند 403: يجرب بدون feed مرة واحدة ويحفظ النتيجة
+    - Retry ×3 مع exponential backoff
+    - لا يُكرر فحص feed في كل استدعاء — يُقرر مرة واحدة للجلسة كلها
     """
-    attempt = 0
-    original_params = params.copy()
+    global _working_feed
+
+    attempt        = 0
+    tried_no_feed  = False   # منع تكرار محاولة "بلا feed" في نفس الاستدعاء
+
+    # ── استخدم الـ feed المعروف بدلاً من ما أُرسل في params
+    working_params = params.copy()
+    if "feed" in working_params:
+        if _working_feed is None:
+            # نعرف مسبقاً أن feed محجوب — احذفه فوراً
+            working_params.pop("feed", None)
+        else:
+            # استخدم الـ feed الناجح (iex أو sip)
+            working_params["feed"] = _working_feed
 
     while attempt < MAX_RETRIES:
         try:
             response = requests.get(
                 url,
                 headers=HEADERS,
-                params=params,
+                params=working_params,
                 timeout=REQUEST_TIMEOUT,
             )
 
-            # fallback إذا 403 وكان فيه feed
-            if response.status_code == 403 and "feed" in params:
-                params = original_params.copy()
-                params.pop("feed", None)
-                attempt += 1
+            # ── 403: feed محجوب على هذا الحساب
+            if response.status_code == 403 and "feed" in working_params and not tried_no_feed:
+                old_feed = working_params.get("feed", "iex")
+                working_params.pop("feed", None)
+                tried_no_feed = True
+                print(f"⚠️  Feed '{old_feed}' محجوب (403) — التبديل لبيانات بدون feed تلقائياً")
                 time.sleep(RETRY_DELAY)
                 continue
 
             if response.status_code == 200:
+                # ── تسجيل الـ feed الناجح للجلسة كلها
+                if "feed" in working_params and _working_feed != working_params["feed"]:
+                    _working_feed = working_params["feed"]
+                    print(f"✅ Feed '{_working_feed}' نشط ومحفوظ للجلسة")
+                elif "feed" not in working_params and tried_no_feed and _working_feed is not None:
+                    _working_feed = None
+                    print("✅ Feed مُعطَّل — الجلسة ستعمل بدون feed (بيانات افتراضية)")
                 return response
+
+            # ── أخطاء أخرى (429 rate limit, 5xx server)
+            if response.status_code == 429:
+                wait = RETRY_DELAY * (attempt + 2)
+                print(f"⏳ Rate limit (429) — انتظار {wait:.1f}s")
+                time.sleep(wait)
+            elif response.status_code >= 500:
+                print(f"⚠️  Server error {response.status_code} — محاولة {attempt + 1}/{MAX_RETRIES}")
+                time.sleep(RETRY_DELAY * attempt)
 
         except Exception as e:
             print(f"Request error: {e}")
+            time.sleep(RETRY_DELAY * attempt)
 
         attempt += 1
-        time.sleep(RETRY_DELAY * attempt)
 
     print(f"❌ Failed request after {MAX_RETRIES} attempts: {url}")
     return None
+
+
+def get_active_feed() -> str:
+    """يُرجع اسم الـ feed النشط حالياً — للـ logging والـ debugging."""
+    return _working_feed if _working_feed else "default (no feed)"
 
 
 # ─────────────────────────────────────────
@@ -286,7 +327,7 @@ def get_ema200_batch(symbols: list) -> dict:
 
 def get_daily_universe() -> dict:
 
-    print("🔍 Selecting Mean Reversion universe...")
+    print(f"🔍 Selecting Mean Reversion universe... [feed={get_active_feed()}]")
 
     assets = get_tradable_assets()
     if not assets:
