@@ -190,8 +190,27 @@ def apply_position_limits(
     open_mom_short  = sum(1 for t in current_positions.values() if t == ("short", "momentum"))
     open_total      = len(current_positions)
 
-    # استبعاد الأسهم المفتوحة مسبقاً
+    # ── الطبقة 1: استبعاد الأسهم المفتوحة مسبقاً (نفس الاتجاه)
     signals = [s for s in signals if s.ticker not in current_positions]
+
+    # ── الطبقة 3: رفض الإشارة المعاكسة لمركز مفتوح على نفس السهم
+    # مثال: AAPL مفتوح LONG بـ MeanRev → نرفض Momentum SHORT على AAPL
+    # current_positions شكله: {ticker: (side, strategy)}
+    conflicted = []
+    clean      = []
+    for s in signals:
+        existing = current_positions.get(s.ticker)
+        if existing:
+            open_side = existing[0] if isinstance(existing, tuple) else existing
+            if open_side != s.side:
+                conflicted.append(s)
+                continue
+        clean.append(s)
+
+    if conflicted:
+        print(f"  ⚔️  رُفض {len(conflicted)} إشارة معاكسة لمركز مفتوح: "
+              f"{[f'{s.ticker}({s.side})' for s in conflicted]}")
+    signals = clean
 
     # ── رفض الإشارات ضعيفة الجودة (Score < 10)
     MIN_SCORE = 10
