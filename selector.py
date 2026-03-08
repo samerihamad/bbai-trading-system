@@ -88,12 +88,9 @@ def score_signal(sig: MeanRevSignal) -> float:
         elif sig.rsi > 75:
             score += 10
 
-    # تايم فريم — الأولوية لـ 1Day
-    if "[1Day]" in sig.reason:
-        score += 10
-    elif "[1Hour]" in sig.reason:
-        score += 5
-    # 15Min = 0 (الأكثر ضوضاء)
+    # تايم فريم — الأولوية لـ 1Day (من حقل timeframe مباشرة — لا string parsing)
+    tf_scores = {"1Day": 10, "1Hour": 5, "15Min": 0}
+    score += tf_scores.get(sig.timeframe, 0)
 
     # ADX مناسب لـ MeanRev (15-30)
     if "MOM" not in sig.reason and 15 <= sig.adx <= 30:
@@ -347,6 +344,7 @@ def run_selector(
                 ema200=ema200,
                 signal_quality=mom_raw.signal_quality,
                 liquidity_sweep=False,
+                timeframe="15Min",   # Momentum يعمل على 15Min دائماً
             )
             candidates.append(mom_unified)
 
