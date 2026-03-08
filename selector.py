@@ -3,12 +3,12 @@
 # يفرض حدود MAX_LONG / MAX_SHORT / MAX_TOTAL
 # =============================================================
 
-import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
+from universe import _safe_get
 from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
@@ -30,11 +30,6 @@ from strategy_momentum import (
     analyze as momentum_analyze,
     MomentumSignal,
 )
-
-HEADERS = {
-    "APCA-API-KEY-ID":     ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-}
 
 
 # ─────────────────────────────────────────
@@ -125,18 +120,18 @@ def fetch_daily_bars(ticker: str, days: int = 30) -> pd.DataFrame:
     start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        response = requests.get(
+        response = _safe_get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
-            headers=HEADERS,
-            params={
+            {
                 "timeframe": "1Day",
                 "start":     start,
                 "end":       end,
                 "limit":     days,
                 "feed":      "iex",
             },
-            timeout=15,
         )
+        if not response:
+            return pd.DataFrame()
         bars = response.json().get("bars", [])
         if not bars:
             return pd.DataFrame()
