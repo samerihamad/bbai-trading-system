@@ -4,12 +4,12 @@
 # المبدأ: Buy High Sell Higher / Short Low Cover Lower
 # =============================================================
 
-import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
+from universe import _safe_get
 from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
@@ -26,11 +26,6 @@ from config import (
     SHORT_ENABLED,
     SHORT_EXCHANGES,
 )
-
-HEADERS = {
-    "APCA-API-KEY-ID":     ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-}
 
 NEWS_API_URL = "https://data.alpaca.markets/v1beta1/news"
 
@@ -70,18 +65,18 @@ def fetch_15min_bars(ticker: str, bars: int = 100) -> pd.DataFrame:
     start = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        response = requests.get(
+        response = _safe_get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
-            headers=HEADERS,
-            params={
+            {
                 "timeframe": "15Min",
                 "start":     start,
                 "end":       end,
                 "limit":     bars,
                 "feed":      "iex",
             },
-            timeout=15,
         )
+        if not response:
+            return pd.DataFrame()
         data = response.json().get("bars", [])
         if not data:
             return pd.DataFrame()
@@ -102,18 +97,18 @@ def fetch_daily_bars(ticker: str, days: int = 5) -> pd.DataFrame:
     start = (datetime.utcnow() - timedelta(days=days + 5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        response = requests.get(
+        response = _safe_get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
-            headers=HEADERS,
-            params={
+            {
                 "timeframe": "1Day",
                 "start":     start,
                 "end":       end,
                 "limit":     days,
                 "feed":      "iex",
             },
-            timeout=15,
         )
+        if not response:
+            return pd.DataFrame()
         data = response.json().get("bars", [])
         if not data:
             return pd.DataFrame()
@@ -222,13 +217,19 @@ def calc_gap_pct(df_daily: pd.DataFrame, df_15min: pd.DataFrame) -> float:
 def check_news(ticker: str) -> bool:
     """
     يتحقق إذا كان هناك خبر محرك في آخر 24 ساعة.
-    يستخدم Alpaca News API.
+    يستخدم Alpaca News API — endpoint مختلف لا يدعم feed param.
     """
+    import requests as _requests
+    from config import ALPACA_API_KEY, ALPACA_SECRET_KEY
+    _headers = {
+        "APCA-API-KEY-ID":     ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
     try:
         since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        response = requests.get(
+        response = _requests.get(
             NEWS_API_URL,
-            headers=HEADERS,
+            headers=_headers,
             params={
                 "symbols": ticker,
                 "start":   since,
