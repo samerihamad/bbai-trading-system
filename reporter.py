@@ -10,6 +10,7 @@ import pytz
 
 from config import TIMEZONE
 from notifier import notify_daily_report
+from risk import SLIPPAGE_PER_SHARE
 
 TZ = pytz.timezone(TIMEZONE)
 
@@ -99,11 +100,17 @@ def record_trade(
     """يسجل صفقة مكتملة ويحسب النتائج تلقائياً."""
 
     if side == "long":
-        pnl        = round((exit_price - entry_price) * quantity, 2)
-        r_achieved = round((exit_price - entry_price) / abs(entry_price - stop_loss), 2) if stop_loss != entry_price else 0.0
+        # دخلت بسعر أعلى + خرجت بسعر أقل
+        entry_adj  = entry_price + SLIPPAGE_PER_SHARE
+        exit_adj   = exit_price  - SLIPPAGE_PER_SHARE
+        pnl        = round((exit_adj - entry_adj) * quantity, 2)
+        r_achieved = round((exit_adj - entry_adj) / abs(entry_adj - stop_loss), 2) if stop_loss != entry_price else 0.0
     else:
-        pnl        = round((entry_price - exit_price) * quantity, 2)
-        r_achieved = round((entry_price - exit_price) / abs(entry_price - stop_loss), 2) if stop_loss != entry_price else 0.0
+        # بعت بسعر أقل + غطيت بسعر أعلى
+        entry_adj  = entry_price - SLIPPAGE_PER_SHARE
+        exit_adj   = exit_price  + SLIPPAGE_PER_SHARE
+        pnl        = round((entry_adj - exit_adj) * quantity, 2)
+        r_achieved = round((entry_adj - exit_adj) / abs(entry_adj - stop_loss), 2) if stop_loss != entry_price else 0.0
 
     outcome = "win" if pnl > 0 else "loss"
 
