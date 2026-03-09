@@ -220,14 +220,30 @@ def get_volume_data(assets: list) -> pd.DataFrame:
                     daily_low   = float(daily.get("l") or last_price)
                     prev_close  = float(prev.get("c") or last_price)
 
-                    # نسبة التغيير عن إغلاق أمس
+                    # ── نسبة التغيير عن إغلاق أمس
                     change_pct  = abs(last_price - prev_close) / prev_close if prev_close > 0 else 0
 
-                    # نطاق اليوم كنسبة من السعر (Intraday Range)
+                    # ── نطاق اليوم كنسبة من السعر (Intraday Range)
                     intraday_range = (daily_high - daily_low) / last_price if last_price > 0 else 0
 
-                    # مضاعف الحجم عن المعتاد (Volume Spike)
-                    vol_spike = daily_vol / prev_vol if prev_vol > 0 else 1.0
+                    # ── Volume Spike — مُعدَّل حسب وقت الجلسة
+                    # في الصباح الباكر daily_vol صغير طبيعياً
+                    # نُقدَّر الحجم اليومي المتوقع بناءً على الوقت المنقضي
+                    # السوق يفتح 9:30 — 6.5 ساعة = 390 دقيقة
+                    from datetime import datetime as _dt
+                    import pytz as _pytz
+                    _ny  = _pytz.timezone("America/New_York")
+                    _now = _dt.now(_pytz.utc).astimezone(_ny)
+                    _market_open = _now.replace(hour=9, minute=30, second=0, microsecond=0)
+                    _elapsed_min = max((_now - _market_open).total_seconds() / 60, 1)
+                    _day_fraction = min(_elapsed_min / 390, 1.0)   # نسبة اليوم المنقضية (0→1)
+
+                    if prev_vol > 0 and _day_fraction > 0:
+                        # نُقدَّر الحجم اليومي الكامل المتوقع
+                        projected_vol = daily_vol / _day_fraction
+                        vol_spike     = projected_vol / prev_vol
+                    else:
+                        vol_spike = 1.0
 
                     # Score الإجمالي للحركة — كلما كان أعلى كلما كان السهم أكثر حركة
                     volatility_score = round(
