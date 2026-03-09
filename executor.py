@@ -640,6 +640,42 @@ def open_meanrev_trade(
     print(f"   ✅ أمر TP1: {order_id_1[:8] if order_id_1 else 'N/A'}...")
     print(f"   ✅ أمر TP2: {order_id_2[:8] if order_id_2 else 'فشل'}...")
 
+    # ── انتظر ثانيتين ثم تحقق من الكمية الفعلية المنفّذة في Alpaca
+    # هذا يحل مشكلة partial fill حيث تختلف الكمية الفعلية عن المطلوبة
+    time.sleep(2)
+    actual_tp1_qty = tp1_qty
+    actual_tp2_qty = tp2_qty
+
+    if order_id_1:
+        try:
+            r1 = requests.get(
+                f"{ALPACA_BASE_URL}/v2/orders/{order_id_1}",
+                headers=HEADERS, timeout=10,
+            )
+            if r1.status_code == 200:
+                filled = int(float(r1.json().get("filled_qty") or tp1_qty))
+                if filled > 0:
+                    actual_tp1_qty = filled
+        except Exception:
+            pass
+
+    if order_id_2:
+        try:
+            r2 = requests.get(
+                f"{ALPACA_BASE_URL}/v2/orders/{order_id_2}",
+                headers=HEADERS, timeout=10,
+            )
+            if r2.status_code == 200:
+                filled = int(float(r2.json().get("filled_qty") or tp2_qty))
+                if filled > 0:
+                    actual_tp2_qty = filled
+        except Exception:
+            pass
+
+    actual_total = actual_tp1_qty + actual_tp2_qty
+    if actual_total != total_qty:
+        print(f"   ℹ️  كمية فعلية: {actual_total} (طُلب: {total_qty}) — tp1={actual_tp1_qty} tp2={actual_tp2_qty}")
+
     return OpenTrade(
         ticker=signal.ticker,
         strategy=strategy,
@@ -652,8 +688,8 @@ def open_meanrev_trade(
         target_tp2=signal.target_tp2,
         trail_stop=0.0,
         trail_step=signal.trail_step,
-        quantity=total_qty,
-        quantity_remaining=tp2_qty,
+        quantity=actual_total,
+        quantity_remaining=actual_tp2_qty,
         tp1_hit=False,
         peak_price=signal.entry_price,
         risk_amount=sizing["risk_amount"],
@@ -741,6 +777,21 @@ def monitor_trade(trade: OpenTrade) -> dict:
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
+
+
+def get_position_qty_available(ticker: str) -> int:
+    """يجلب الكمية المتاحة للبيع من Alpaca للسهم المحدد."""
+    try:
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
+            headers=HEADERS,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return abs(int(float(r.json().get("qty_available", 0))))
+    except Exception as e:
+        print(f"⚠️  فشل جلب qty_available لـ {ticker}: {e}")
+    return 0
 
 
 def close_all_positions() -> bool:
