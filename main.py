@@ -268,7 +268,18 @@ def monitor_open_trades():
             if status == "stopped":
                 exit_qty = result.get("exit_qty", trade.quantity)
                 log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty}")
-                place_market_sell(trade.ticker, exit_qty, side=side)
+
+                # ── تحقق من الكمية الفعلية — Alpaca bracket ربما نفّذ SL تلقائياً
+                available = get_position_qty_available(trade.ticker)
+                if available == 0:
+                    log(f"ℹ️  STOP {trade.ticker}: Alpaca نفّذ الإغلاق تلقائياً — تحديث السجل فقط")
+                elif available < exit_qty:
+                    log(f"ℹ️  STOP {trade.ticker}: كمية متاحة ({available}) — تعديل من {exit_qty}")
+                    exit_qty = available
+                    place_market_sell(trade.ticker, exit_qty, side=side)
+                else:
+                    place_market_sell(trade.ticker, exit_qty, side=side)
+
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
@@ -340,7 +351,18 @@ def monitor_open_trades():
                 exit_qty = result.get("exit_qty", trade.quantity_remaining if trade.tp1_hit else trade.quantity)
                 label    = "TP2" if trade.tp1_hit else "TARGET"
                 log(f"{label}: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f}")
-                place_market_sell(trade.ticker, exit_qty, side=side)
+
+                # ── تحقق من الكمية الفعلية — Alpaca bracket ربما نفّذ TP2 تلقائياً
+                available = get_position_qty_available(trade.ticker)
+                if available == 0:
+                    log(f"ℹ️  {label} {trade.ticker}: Alpaca نفّذ الإغلاق تلقائياً — تحديث السجل فقط")
+                elif available < exit_qty:
+                    log(f"ℹ️  {label} {trade.ticker}: كمية متاحة ({available}) — تعديل من {exit_qty}")
+                    exit_qty = available
+                    place_market_sell(trade.ticker, exit_qty, side=side)
+                else:
+                    place_market_sell(trade.ticker, exit_qty, side=side)
+
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
