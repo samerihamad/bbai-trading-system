@@ -32,6 +32,7 @@ from executor         import (
     monitor_trade,
     place_market_sell,
     close_all_positions,
+    get_position_qty_available,
     _save_open_trades,
     _delete_open_trades_sheets,
     OpenTrade,
@@ -296,15 +297,26 @@ def monitor_open_trades():
                 tp1_qty  = result.get("exit_qty", trade.quantity // 2)
                 new_stop = result["new_stop"]
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
-                place_market_sell(trade.ticker, tp1_qty, side=side)
+
+                # ── تحقق من الكمية الفعلية المتاحة في Alpaca
+                # Bracket order ربما نفّذ TP1 تلقائياً → qty_available = 0
+                available = get_position_qty_available(trade.ticker)
+                if available < tp1_qty:
+                    log(f"ℹ️  TP1 {trade.ticker}: Alpaca نفّذ البيع تلقائياً (available={available}) — تحديث الحالة فقط")
+                    tp1_qty = available  # قد يكون 0 إذا نفّذه Alpaca بالكامل
+
+                if tp1_qty > 0:
+                    place_market_sell(trade.ticker, tp1_qty, side=side)
+
                 pnl_tp1 = round(
-                    (price - trade.entry_price) * tp1_qty if side == "long"
-                    else (trade.entry_price - price) * tp1_qty, 2
+                    (price - trade.entry_price) * result.get("exit_qty", trade.quantity // 2) if side == "long"
+                    else (trade.entry_price - price) * result.get("exit_qty", trade.quantity // 2), 2
                 )
                 record_trade(
                     ticker=trade.ticker, strategy=trade.strategy,
                     entry_price=trade.entry_price, exit_price=price,
-                    quantity=tp1_qty, stop_loss=trade.stop_loss,
+                    quantity=result.get("exit_qty", trade.quantity // 2),
+                    stop_loss=trade.stop_loss,
                     target=trade.target_tp1, risk_amount=trade.risk_amount / 2,
                     exit_reason="tp1", opened_at=trade.opened_at, side=side,
                 )
@@ -312,7 +324,7 @@ def monitor_open_trades():
                 try:
                     notify_trade_win(
                         ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=tp1_qty,
+                        exit_price=price, quantity=result.get("exit_qty", trade.quantity // 2),
                         profit=pnl_tp1, r_achieved=r,
                     )
                     notify_stop_updated(
