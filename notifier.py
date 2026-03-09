@@ -63,13 +63,19 @@ def notify_trade_open(
     ticker: str, strategy: str, side: str,
     price: float, quantity: int,
     stop_loss: float, target: float, risk_amount: float,
+    trade_number: int = 0,
 ) -> bool:
     emoji       = "🟩" if "BUY" in side else "🟥"
     side_ar     = "شراء" if "BUY" in side else "بيع على المكشوف"
     r_ratio     = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
     total_value = round(price * quantity, 2)
+
+    # ── رقم الصفقة
+    trade_num_en = f"\n🔔 <b>NEW TRADE #{trade_number}</b> 🔔" if trade_number > 0 else ""
+    trade_num_ar = f"\n🔔 <b>صفقة جديدة #{trade_number}</b> 🔔" if trade_number > 0 else ""
+
     msg = (
-        f"{emoji} <b>New Trade -- {ticker}</b>\n"
+        f"{emoji} <b>New Trade -- {ticker}</b>{trade_num_en}\n"
         f"📅 {_now()}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🇬🇧 <b>English</b>\n"
@@ -93,6 +99,7 @@ def notify_trade_open(
         f"🎯 الهدف         : ${target:.2f}\n"
         f"📈 نسبة R        : {r_ratio}R\n"
         f"⚠️  المخاطرة      : ${risk_amount:.2f}"
+        f"{trade_num_ar}"
     )
     return _send(msg)
 
