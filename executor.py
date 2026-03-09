@@ -589,12 +589,18 @@ def open_meanrev_trade(
     balance      = account.get("balance", balance) if account else balance
     buying_power = account.get("buying_power", 0) if account else 0
 
+    # ── حساب نسبة المخاطرة الديناميكية من الـ Score
+    from risk import dynamic_risk_pct
+    sig_score    = getattr(signal, "score", 0)
+    risk_pct     = dynamic_risk_pct(sig_score)
+
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         use_leverage=True,
         buying_power=buying_power,
+        risk_override=risk_pct,
     )
 
     total_qty = sizing["quantity"]
@@ -606,6 +612,7 @@ def open_meanrev_trade(
     strategy_label = "زخم" if strategy == "momentum" else "ارتداد"
 
     print(f"\n📤 فتح صفقة {strategy_label} — {signal.ticker} {side_label} [{quality}]")
+    print(f"   Score          : {sig_score:.0f} → مخاطرة {sizing['risk_pct']}%")
     print(f"   الكمية الكلية : {total_qty}")
     print(f"   TP1 ({tp1_qty} سهم) : ${signal.target_tp1:.2f} (1R)")
     print(f"   TP2 ({tp2_qty} سهم) : ${signal.target_tp2:.2f} (3R)")
