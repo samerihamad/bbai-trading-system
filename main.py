@@ -80,6 +80,7 @@ _pre_market_done  : bool = False
 _pre_alert_done   : bool = False
 _close_done      : bool = False
 _current_day     : str  = ""
+_daily_trade_num : int  = 0   # عداد الصفقات اليومية لرقم الصفقة في Telegram
 
 # تتبع الأخطاء المتكررة لإرسال إشعار مرة واحدة فقط
 _consecutive_errors : int  = 0
@@ -134,13 +135,14 @@ def is_close_time() -> bool:
 
 
 def check_new_day():
-    global _pre_market_done, _close_done, _current_day, _pre_alert_done
+    global _pre_market_done, _close_done, _current_day, _pre_alert_done, _daily_trade_num
     today = get_ny_time().strftime("%Y-%m-%d")
     if today != _current_day:
         _current_day     = today
         _pre_market_done = False
         _pre_alert_done  = False
         _close_done      = False
+        _daily_trade_num = 0
         log(f"New trading day: {today} -- flags reset")
 
 
@@ -466,7 +468,7 @@ def refresh_universe_if_needed():
 # -----------------------------------------
 
 def scan_for_signals():
-    global open_trades, last_no_opp, last_scan
+    global open_trades, last_no_opp, last_scan, _daily_trade_num
 
     if len(open_trades) >= MAX_TOTAL:
         return
@@ -496,6 +498,7 @@ def scan_for_signals():
             strategy = "momentum" if "MOM" in signal.reason else "meanrev"
             trade = open_meanrev_trade(signal, balance, strategy=strategy)
             if trade:
+                _daily_trade_num += 1
                 open_trades.append(trade)
                 _save_open_trades(open_trades)
                 found_signal = True
@@ -509,6 +512,7 @@ def scan_for_signals():
                         stop_loss=signal.stop_loss,
                         target=signal.target_tp2,
                         risk_amount=trade.risk_amount,
+                        trade_number=_daily_trade_num,
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
@@ -582,7 +586,7 @@ def run_market_close():
 
 def main():
     global _consecutive_errors, _error_notified
-    global _pre_market_done, _pre_alert_done, _close_done, _current_day
+    global _pre_market_done, _pre_alert_done, _close_done, _current_day, _daily_trade_num
 
     log("=" * 55)
     log("BBAI Trading System -- Starting")
