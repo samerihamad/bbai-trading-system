@@ -10,7 +10,6 @@ import pytz
 
 from config import TIMEZONE
 from notifier import notify_daily_report
-from risk import SLIPPAGE_PER_SHARE
 
 TZ = pytz.timezone(TIMEZONE)
 
@@ -100,17 +99,11 @@ def record_trade(
     """يسجل صفقة مكتملة ويحسب النتائج تلقائياً."""
 
     if side == "long":
-        # دخلت بسعر أعلى + خرجت بسعر أقل
-        entry_adj  = entry_price + SLIPPAGE_PER_SHARE
-        exit_adj   = exit_price  - SLIPPAGE_PER_SHARE
-        pnl        = round((exit_adj - entry_adj) * quantity, 2)
-        r_achieved = round((exit_adj - entry_adj) / abs(entry_adj - stop_loss), 2) if stop_loss != entry_price else 0.0
+        pnl        = round((exit_price - entry_price) * quantity, 2)
+        r_achieved = round((exit_price - entry_price) / abs(entry_price - stop_loss), 2) if stop_loss != entry_price else 0.0
     else:
-        # بعت بسعر أقل + غطيت بسعر أعلى
-        entry_adj  = entry_price - SLIPPAGE_PER_SHARE
-        exit_adj   = exit_price  + SLIPPAGE_PER_SHARE
-        pnl        = round((entry_adj - exit_adj) * quantity, 2)
-        r_achieved = round((entry_adj - exit_adj) / abs(entry_adj - stop_loss), 2) if stop_loss != entry_price else 0.0
+        pnl        = round((entry_price - exit_price) * quantity, 2)
+        r_achieved = round((entry_price - exit_price) / abs(entry_price - stop_loss), 2) if stop_loss != entry_price else 0.0
 
     outcome = "win" if pnl > 0 else "loss"
 
@@ -170,12 +163,76 @@ def calculate_daily_stats(trades: list[dict]) -> dict:
 
 
 # -----------------------------------------
-# 4. ارسال التقرير اليومي
+# 4. حفظ الملخص اليومي في Sheets
+# -----------------------------------------
+
+DAILY_SUMMARY_SHEET  = "Daily Summary"
+DAILY_SUMMARY_HEADERS = [
+    "date", "total_trades", "wins", "losses", "win_rate",
+    "long_trades", "short_trades",
+    "total_r", "total_pnl",
+    "best_trade", "worst_trade", "avg_win", "avg_loss",
+    "balance",
+]
+
+def _save_daily_summary_sheets(stats: dict, balance: float, today: str) -> None:
+    """يحفظ ملخص اليوم في تبويب Daily Summary في Google Sheets."""
+    try:
+        from executor import _get_sheets_client
+        import os
+        gc = _get_sheets_client()
+        if not gc:
+            return
+        SHEET_ID = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
+        ss = gc.open_by_key(SHEET_ID)
+
+        # إنشاء التبويب إذا لم يكن موجوداً
+        try:
+            ws = ss.worksheet(DAILY_SUMMARY_SHEET)
+        except Exception:
+            ws = ss.add_worksheet(title=DAILY_SUMMARY_SHEET, rows=500, cols=len(DAILY_SUMMARY_HEADERS))
+            ws.append_row(DAILY_SUMMARY_HEADERS)
+
+        # تحقق إذا اليوم مسجّل مسبقاً — تحديث بدلاً من إضافة مكرر
+        existing = ws.get_all_records()
+        for idx, row in enumerate(existing, start=2):  # start=2 لأن صف 1 هو الـ headers
+            if str(row.get("date", "")) == today:
+                # تحديث الصف الموجود
+                ws.update(f"A{idx}:{chr(65 + len(DAILY_SUMMARY_HEADERS) - 1)}{idx}", [[
+                    today,
+                    stats["total_trades"], stats["wins"], stats["losses"],
+                    stats["win_rate"], stats["long_trades"], stats["short_trades"],
+                    stats["total_r"], stats["total_pnl"],
+                    stats["best_trade"], stats["worst_trade"],
+                    stats["avg_win"], stats["avg_loss"],
+                    round(balance, 2),
+                ]])
+                print(f"✅ Daily Summary لـ {today} تم تحديثه في Google Sheets")
+                return
+
+        # إضافة صف جديد
+        ws.append_row([
+            today,
+            stats["total_trades"], stats["wins"], stats["losses"],
+            stats["win_rate"], stats["long_trades"], stats["short_trades"],
+            stats["total_r"], stats["total_pnl"],
+            stats["best_trade"], stats["worst_trade"],
+            stats["avg_win"], stats["avg_loss"],
+            round(balance, 2),
+        ], value_input_option="RAW")
+        print(f"✅ Daily Summary لـ {today} تم حفظه في Google Sheets")
+
+    except Exception as e:
+        print(f"⚠️  فشل حفظ Daily Summary: {e}")
+
+
+# -----------------------------------------
+# 5. ارسال التقرير اليومي
 # -----------------------------------------
 
 def send_daily_report(balance: float, open_trades: list = None) -> bool:
     """
-    يجمع صفقات اليوم ويرسل تقريراً عبر Telegram.
+    يجمع صفقات اليوم ويرسل تقريراً عبر Telegram ويحفظ الملخص في Sheets.
     يُستدعى مرة واحدة فقط من main.py عند اغلاق السوق.
     """
     trades = load_today_trades()
@@ -198,6 +255,9 @@ def send_daily_report(balance: float, open_trades: list = None) -> bool:
         avg_loss=stats["avg_loss"],
         open_trades=open_trades or [],
     )
+
+    # ── حفظ الملخص اليومي في Google Sheets
+    _save_daily_summary_sheets(stats, balance, today)
 
     # طباعة في الـ logs
     print("\n" + "=" * 55)
