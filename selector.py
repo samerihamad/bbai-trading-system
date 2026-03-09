@@ -198,14 +198,16 @@ def apply_position_limits(
     # استبعاد الأسهم المفتوحة مسبقاً
     signals = [s for s in signals if s.ticker not in current_positions]
 
-    # ── رفض الإشارات ضعيفة الجودة (Score < 10)
-    MIN_SCORE = 10
+    # ── رفض الإشارات ضعيفة الجودة
+    # الحد الأدنى 20 متوافق مع Dynamic Risk:
+    # Score < 20 → مخاطرة 2% فقط، ومعظمها إشارات ضعيفة لا تستحق الدخول
+    MIN_SCORE = 20
     rejected_weak = [s for s in signals if score_signal(s) < MIN_SCORE]
     signals       = [s for s in signals if score_signal(s) >= MIN_SCORE]
     if rejected_weak:
         print(f"  ⛔ رُفض {len(rejected_weak)} إشارة Score < {MIN_SCORE}: {[s.ticker for s in rejected_weak]}")
 
-    # ── ترتيب بالـ Score (الأعلى أولاً) — التعديل الجديد
+    # ── ترتيب بالـ Score (الأعلى أولاً)
     signals.sort(key=lambda x: score_signal(x), reverse=True)
 
     # ── تخزين الـ Score في كل إشارة للاستخدام في Dynamic Risk
@@ -216,7 +218,7 @@ def apply_position_limits(
     print("\n📊 Signal Ranking:")
     for i, s in enumerate(signals[:10], 1):
         sc = score_signal(s)
-        tf = "[1Day]" if "[1Day]" in s.reason else "[1Hour]" if "[1Hour]" in s.reason else "[15Min]"
+        tf = f"[{s.timeframe}]"   # استخدام الحقل المباشر بدلاً من تحليل sig.reason
         print(f"   #{i} {s.ticker:6s} {s.side.upper():5s} | Score={sc:.0f} | RSI={s.rsi:.1f} | {tf} | {'⭐' if s.signal_quality=='high' else ''} {'🎯' if s.liquidity_sweep else ''}")
 
     selected     = []
