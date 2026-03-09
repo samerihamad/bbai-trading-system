@@ -3,12 +3,12 @@
 # يفرض حدود MAX_LONG / MAX_SHORT / MAX_TOTAL
 # =============================================================
 
+import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
-from universe import _safe_get
 from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
@@ -30,6 +30,11 @@ from strategy_momentum import (
     analyze as momentum_analyze,
     MomentumSignal,
 )
+
+HEADERS = {
+    "APCA-API-KEY-ID":     ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+}
 
 
 # ─────────────────────────────────────────
@@ -88,9 +93,12 @@ def score_signal(sig: MeanRevSignal) -> float:
         elif sig.rsi > 75:
             score += 10
 
-    # تايم فريم — الأولوية لـ 1Day (من حقل timeframe مباشرة — لا string parsing)
-    tf_scores = {"1Day": 10, "1Hour": 5, "15Min": 0}
-    score += tf_scores.get(sig.timeframe, 0)
+    # تايم فريم — الأولوية لـ 1Day
+    if "[1Day]" in sig.reason:
+        score += 10
+    elif "[1Hour]" in sig.reason:
+        score += 5
+    # 15Min = 0 (الأكثر ضوضاء)
 
     # ADX مناسب لـ MeanRev (15-30)
     if "MOM" not in sig.reason and 15 <= sig.adx <= 30:
@@ -117,18 +125,18 @@ def fetch_daily_bars(ticker: str, days: int = 30) -> pd.DataFrame:
     start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        response = _safe_get(
+        response = requests.get(
             f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars",
-            {
+            headers=HEADERS,
+            params={
                 "timeframe": "1Day",
                 "start":     start,
                 "end":       end,
                 "limit":     days,
                 "feed":      "iex",
             },
+            timeout=15,
         )
-        if not response:
-            return pd.DataFrame()
         bars = response.json().get("bars", [])
         if not bars:
             return pd.DataFrame()
@@ -187,27 +195,8 @@ def apply_position_limits(
     open_mom_short  = sum(1 for t in current_positions.values() if t == ("short", "momentum"))
     open_total      = len(current_positions)
 
-    # ── الطبقة 1: استبعاد الأسهم المفتوحة مسبقاً (نفس الاتجاه)
+    # استبعاد الأسهم المفتوحة مسبقاً
     signals = [s for s in signals if s.ticker not in current_positions]
-
-    # ── الطبقة 3: رفض الإشارة المعاكسة لمركز مفتوح على نفس السهم
-    # مثال: AAPL مفتوح LONG بـ MeanRev → نرفض Momentum SHORT على AAPL
-    # current_positions شكله: {ticker: (side, strategy)}
-    conflicted = []
-    clean      = []
-    for s in signals:
-        existing = current_positions.get(s.ticker)
-        if existing:
-            open_side = existing[0] if isinstance(existing, tuple) else existing
-            if open_side != s.side:
-                conflicted.append(s)
-                continue
-        clean.append(s)
-
-    if conflicted:
-        print(f"  ⚔️  رُفض {len(conflicted)} إشارة معاكسة لمركز مفتوح: "
-              f"{[f'{s.ticker}({s.side})' for s in conflicted]}")
-    signals = clean
 
     # ── رفض الإشارات ضعيفة الجودة (Score < 10)
     MIN_SCORE = 10
@@ -218,6 +207,10 @@ def apply_position_limits(
 
     # ── ترتيب بالـ Score (الأعلى أولاً) — التعديل الجديد
     signals.sort(key=lambda x: score_signal(x), reverse=True)
+
+    # ── تخزين الـ Score في كل إشارة للاستخدام في Dynamic Risk
+    for s in signals:
+        s.score = score_signal(s)
 
     # طباعة الترتيب
     print("\n📊 Signal Ranking:")
@@ -344,7 +337,6 @@ def run_selector(
                 ema200=ema200,
                 signal_quality=mom_raw.signal_quality,
                 liquidity_sweep=False,
-                timeframe="15Min",   # Momentum يعمل على 15Min دائماً
             )
             candidates.append(mom_unified)
 
