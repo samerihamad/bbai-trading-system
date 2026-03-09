@@ -54,18 +54,24 @@ from telegram_commands import (
     notify_error,
 )
 
-TZ = pytz.timezone(TIMEZONE)
+TZ     = pytz.timezone(TIMEZONE)
+UTC_TZ = pytz.utc
 
-# -----------------------------------------
-# الحالة العامة للنظام
-# -----------------------------------------
+
+def get_ny_time() -> datetime:
+    """
+    يأخذ الوقت الحالي بـ UTC أولاً ثم يحوّله لنيويورك.
+    هذه الطريقة مضمونة بغض النظر عن timezone إعدادات السيرفر.
+    datetime.now(TZ) تعتمد على ساعة النظام — datetime.now(UTC) دائماً صحيح.
+    """
+    return datetime.now(UTC_TZ).astimezone(TZ)
 
 risk_manager : DailyRiskManager = DailyRiskManager()
 open_trades  : list              = []
 daily_stocks : dict              = {}
-last_no_opp  : datetime          = datetime.now(TZ) - timedelta(hours=2)
-last_scan    : datetime          = datetime.now(TZ) - timedelta(hours=2)
-last_universe_refresh : datetime = datetime.now(TZ) - timedelta(hours=2)
+last_no_opp  : datetime          = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
+last_scan    : datetime          = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
+last_universe_refresh : datetime = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
 SCAN_INTERVAL_MIN     : int      = 5    # فحص الإشارات كل 5 دقائق
 UNIVERSE_REFRESH_MIN  : int      = 60   # تحديث قائمة الأسهم كل ساعة
 
@@ -84,12 +90,8 @@ _error_notified     : bool = False
 # -----------------------------------------
 
 def log(msg: str):
-    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    now = get_ny_time().strftime("%Y-%m-%d %H:%M:%S %Z")
     print(f"[{now}]  {msg}", flush=True)
-
-
-def get_ny_time() -> datetime:
-    return datetime.now(TZ)
 
 
 def is_weekday() -> bool:
