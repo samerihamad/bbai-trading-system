@@ -266,8 +266,12 @@ def monitor_open_trades():
             side   = trade.side
 
             if status == "stopped":
-                exit_qty = result.get("exit_qty", trade.quantity)
-                log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty}")
+                # ── الكمية الصحيحة: بعد TP1 نستخدم quantity_remaining فقط
+                if trade.tp1_hit:
+                    exit_qty = trade.quantity_remaining
+                else:
+                    exit_qty = result.get("exit_qty", trade.quantity)
+                log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty} | tp1_hit={trade.tp1_hit}")
 
                 # ── تحقق من الكمية الفعلية — Alpaca bracket ربما نفّذ SL تلقائياً
                 available = get_position_qty_available(trade.ticker)
@@ -291,17 +295,32 @@ def monitor_open_trades():
                     target=trade.target, risk_amount=trade.risk_amount,
                     exit_reason="stopped", opened_at=trade.opened_at, side=side,
                 )
-                stopped = risk_manager.record_loss(pnl, r)
-                try:
-                    notify_trade_loss(
-                        ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=exit_qty,
-                        loss=abs(pnl), daily_losses=risk_manager.daily_losses,
-                    )
-                    if stopped:
-                        notify_system_stopped()
-                except Exception as e:
-                    log(f"Telegram error: {e}")
+
+                # ── تمييز WIN/LOSS/BREAKEVEN
+                # بعد TP1: الوقف انتقل للتعادل → الخروج عنده ربح أو تعادل وليس خسارة
+                if trade.tp1_hit and pnl >= 0:
+                    risk_manager.record_win(pnl, r)
+                    log(f"✅ STOP after TP1 = WIN/BREAKEVEN | pnl=${pnl:+.2f}")
+                    try:
+                        notify_trade_win(
+                            ticker=trade.ticker, entry_price=trade.entry_price,
+                            exit_price=price, quantity=exit_qty,
+                            profit=pnl, r_achieved=r,
+                        )
+                    except Exception as e:
+                        log(f"Telegram error: {e}")
+                else:
+                    stopped = risk_manager.record_loss(pnl, r)
+                    try:
+                        notify_trade_loss(
+                            ticker=trade.ticker, entry_price=trade.entry_price,
+                            exit_price=price, quantity=exit_qty,
+                            loss=abs(pnl), daily_losses=risk_manager.daily_losses,
+                        )
+                        if stopped:
+                            notify_system_stopped()
+                    except Exception as e:
+                        log(f"Telegram error: {e}")
                 trades_to_remove.append(trade)
 
             elif status == "tp1_hit":
