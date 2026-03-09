@@ -7,7 +7,6 @@ from config import (
     MAX_DAILY_LOSSES,
     STRATEGY2_LEVERAGE,
     PROFIT_FACTOR_CUT,
-    SLIPPAGE_PER_SHARE,
 )
 
 
@@ -21,13 +20,14 @@ def calculate_position_size(
     stop_loss:     float,
     use_leverage:  bool = False,
     buying_power:  float = 0.0,
+    risk_override: float = None,   # نسبة مخاطرة ديناميكية (تتجاوز RISK_PER_TRADE إذا مُررت)
 ) -> dict:
     """
     يحسب عدد الأسهم بناءً على:
     - الرصيد الحالي
     - سعر الدخول
     - وقف الخسارة
-    - نسبة المخاطرة 3% ديناميكية (Compounding)
+    - نسبة المخاطرة: ديناميكية من الـ Score أو 3% افتراضي (Compounding)
 
     يدعم LONG وSHORT — يستخدم abs() لحساب المسافة.
     يتحقق من buying_power لتجنب insufficient buying power.
@@ -45,15 +45,12 @@ def calculate_position_size(
     if risk_per_share == 0:
         raise ValueError("سعر الدخول ووقف الخسارة متساويان — لا يمكن حساب الحجم")
 
-    # ── تعديل risk_per_share ليشمل تكلفة التنفيذ الفعلي (Slippage)
-    # دخول: السعر الفعلي أسوأ بـ SLIPPAGE_PER_SHARE
-    # خروج: نفس الشيء — المجموع = 2 × SLIPPAGE
-    # هذا يُقلل الكمية قليلاً → حماية من المبالغة في حجم الصفقة
-    risk_per_share_real = risk_per_share + (SLIPPAGE_PER_SHARE * 2)
+    # ── نسبة المخاطرة: ديناميكية إذا مُررت، وإلا الافتراضي من config
+    effective_risk = risk_override if risk_override is not None else RISK_PER_TRADE
 
     leverage    = STRATEGY2_LEVERAGE if use_leverage else 1.0
-    risk_amount = balance * RISK_PER_TRADE
-    quantity    = int((risk_amount * leverage) / risk_per_share_real)
+    risk_amount = balance * effective_risk
+    quantity    = int((risk_amount * leverage) / risk_per_share)
 
     if quantity <= 0:
         quantity = 1
@@ -68,9 +65,26 @@ def calculate_position_size(
     return {
         "quantity":    quantity,
         "risk_amount": round(risk_amount, 2),
-        "risk_pct":    RISK_PER_TRADE * 100,
+        "risk_pct":    round(effective_risk * 100, 1),
         "leverage":    leverage,
     }
+
+
+def dynamic_risk_pct(score: float) -> float:
+    """
+    يحدد نسبة المخاطرة بناءً على قوة الإشارة (Score).
+
+    Score ≥ 50  → 4%  (إشارة قوية: liquidity_sweep أو signal_quality=high)
+    Score 20-49 → 3%  (إشارة عادية — الافتراضي)
+    Score < 20  → 2%  (إشارة ضعيفة — حذر)
+    """
+    if score >= 50:
+        pct = 0.04
+    elif score >= 20:
+        pct = 0.03
+    else:
+        pct = 0.02
+    return pct
 
 
 # ─────────────────────────────────────────
@@ -84,32 +98,18 @@ def calculate_r(
     side:        str = "long",
 ) -> float:
     """
-    يحسب كم R حققت الصفقة بعد خصم Slippage.
-
-    Slippage يُطبَّق على السعرين:
-    LONG  : دخول أغلى بـ SLIPPAGE ← خروج أرخص بـ SLIPPAGE
-    SHORT : دخول أرخص بـ SLIPPAGE ← خروج أغلى بـ SLIPPAGE
-
-    مثال LONG:  entry=100، stop=95، exit=110، slippage=0.02
-      entry_adj = 100.02 | exit_adj = 109.98
-      R = (109.98 - 100.02) / (100.02 - 95) = 9.96 / 5.02 = +1.98R  ← أدق من +2.0R
+    يحسب كم R حققت الصفقة.
+    مثال LONG:  دخلت 100، وقف 95، خرجت 110 → R = +2.0
+    مثال SHORT: دخلت 100، وقف 105، خرجت 90  → R = +2.0
     """
-    # ── تعديل الأسعار بالـ Slippage
-    if side == "long":
-        entry_adj = entry_price + SLIPPAGE_PER_SHARE   # دفعت أكثر عند الدخول
-        exit_adj  = exit_price  - SLIPPAGE_PER_SHARE   # استلمت أقل عند الخروج
-    else:
-        entry_adj = entry_price - SLIPPAGE_PER_SHARE   # بعت بأقل عند الدخول
-        exit_adj  = exit_price  + SLIPPAGE_PER_SHARE   # دفعت أكثر عند التغطية
-
-    risk_per_share = abs(entry_adj - stop_loss)
+    risk_per_share = abs(entry_price - stop_loss)
     if risk_per_share <= 0:
         return 0.0
 
     if side == "long":
-        return round((exit_adj - entry_adj) / risk_per_share, 2)
+        return round((exit_price - entry_price) / risk_per_share, 2)
     else:
-        return round((entry_adj - exit_adj) / risk_per_share, 2)
+        return round((entry_price - exit_price) / risk_per_share, 2)
 
 
 # ─────────────────────────────────────────
