@@ -63,19 +63,39 @@ def notify_trade_open(
     ticker: str, strategy: str, side: str,
     price: float, quantity: int,
     stop_loss: float, target: float, risk_amount: float,
+    target_tp1: float = 0.0, target_tp2: float = 0.0,
+    qty_tp1: int = 0, qty_tp2: int = 0,
     trade_number: int = 0,
 ) -> bool:
     emoji       = "🟩" if "BUY" in side else "🟥"
     side_ar     = "شراء" if "BUY" in side else "بيع على المكشوف"
-    r_ratio     = round(abs(target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
+
+    # استخدام TP2 كـ R ratio إذا متوفر
+    main_target = target_tp2 if target_tp2 > 0 else target
+    r_ratio     = round(abs(main_target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
     total_value = round(price * quantity, 2)
 
-    # ── رقم الصفقة
-    trade_num_en = f"\n🔔 <b>NEW TRADE #{trade_number}</b> 🔔" if trade_number > 0 else ""
-    trade_num_ar = f"\n🔔 <b>صفقة جديدة #{trade_number}</b> 🔔" if trade_number > 0 else ""
+    # رقم الصفقة
+    trade_num_line = f"\n🔔 <b>NEW TRADE #{trade_number}</b> 🔔\n" if trade_number > 0 else ""
+    trade_num_ar   = f"\n🔔 <b>صفقة جديدة #{trade_number}</b> 🔔\n" if trade_number > 0 else ""
+
+    # سطور TP1 / TP2
+    if target_tp1 > 0 and target_tp2 > 0:
+        tp_en = (
+            f"🎯 TP1 ({qty_tp1} shares) : ${target_tp1:.2f} (1R)\n"
+            f"🏆 TP2 ({qty_tp2} shares) : ${target_tp2:.2f} ({r_ratio}R)\n"
+        )
+        tp_ar = (
+            f"🎯 الهدف 1 ({qty_tp1} سهم) : ${target_tp1:.2f} (1R)\n"
+            f"🏆 الهدف 2 ({qty_tp2} سهم) : ${target_tp2:.2f} ({r_ratio}R)\n"
+        )
+    else:
+        tp_en = f"🎯 Target       : ${main_target:.2f}\n📈 R Ratio      : {r_ratio}R\n"
+        tp_ar = f"🎯 الهدف         : ${main_target:.2f}\n📈 نسبة R        : {r_ratio}R\n"
 
     msg = (
-        f"{emoji} <b>New Trade -- {ticker}</b>{trade_num_en}\n"
+        f"{emoji} <b>New Trade -- {ticker}</b>\n"
+        f"{trade_num_line}"
         f"📅 {_now()}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🇬🇧 <b>English</b>\n"
@@ -85,21 +105,19 @@ def notify_trade_open(
         f"🔢 Qty          : {quantity} shares\n"
         f"💵 Total Value  : ${total_value:,.2f}\n"
         f"🔴 Stop Loss    : ${stop_loss:.2f}\n"
-        f"🎯 Target       : ${target:.2f}\n"
-        f"📈 R Ratio      : {r_ratio}R\n"
+        f"{tp_en}"
         f"⚠️  Risk         : ${risk_amount:.2f}\n"
         "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🇦🇪 <b>العربية</b>\n"
+        f"{trade_num_ar}"
         f"📊 الاستراتيجية  : {strategy}\n"
         f"▶️  الاتجاه       : {side_ar}\n"
         f"💰 الدخول        : ${price:.2f}\n"
         f"🔢 الكمية        : {quantity} سهم\n"
         f"💵 إجمالي المبلغ : ${total_value:,.2f}\n"
         f"🔴 وقف الخسارة   : ${stop_loss:.2f}\n"
-        f"🎯 الهدف         : ${target:.2f}\n"
-        f"📈 نسبة R        : {r_ratio}R\n"
+        f"{tp_ar}"
         f"⚠️  المخاطرة      : ${risk_amount:.2f}"
-        f"{trade_num_ar}"
     )
     return _send(msg)
 
