@@ -10,13 +10,14 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional
 
+import config as _config
 from config import (
     ALPACA_API_KEY,
     ALPACA_SECRET_KEY,
     ALPACA_BASE_URL,
     ALPACA_DATA_URL,
 )
-from strategy_meanrev import MeanRevSignal, update_trailing_stop
+from strategy_meanrev import MeanRevSignal, get_current_atr
 from risk import calculate_position_size, calculate_r
 
 # ─────────────────────────────────────────
@@ -487,6 +488,12 @@ class OpenTrade:
     opened_at:           datetime  = None
     closing_in_progress: bool      = False  # علامة: النظام يعالج الإغلاق — sync يتجاهلها
     tp1_pnl:             float     = 0.0    # ربح TP1 المحقق — يُستخدم لحساب total_pnl عند الإغلاق النهائي
+    # ── حقول Trailing Stop المتقدمة
+    trailing_active:     bool      = False  # يُفعَّل عند TP1
+    highest_price:       float     = 0.0    # أعلى سعر بعد TP1 (LONG)
+    lowest_price:        float     = 0.0    # أدنى سعر بعد TP1 (SHORT)
+    current_atr:         float     = 0.0    # ATR يُحدَّث ديناميكياً
+    trail_update_count:  int       = 0      # عداد لمنع loop لا نهائي
 
     def __post_init__(self):
         if self.opened_at is None:
@@ -494,6 +501,11 @@ class OpenTrade:
         # تهيئة peak_price بسعر الدخول
         if self.peak_price == 0.0:
             self.peak_price = self.entry_price
+        # تهيئة highest/lowest بسعر الدخول
+        if self.highest_price == 0.0:
+            self.highest_price = self.entry_price
+        if self.lowest_price == 0.0:
+            self.lowest_price = self.entry_price
 
 
 # ─────────────────────────────────────────
@@ -694,6 +706,85 @@ def cancel_order(order_id: str) -> bool:
     except Exception as e:
         print(f"❌ خطأ في إلغاء الأمر: {e}")
         return False
+
+
+def update_trailing_stop(trade: "OpenTrade", current_price: float) -> dict:
+    """
+    Trailing Stop متقدم بناءً على ATR الديناميكي.
+
+    المنطق:
+    - Long:  يتبع أعلى سعر (highest_price) → stop = highest - trail_step
+    - Short: يتبع أدنى سعر (lowest_price)  → stop = lowest  + trail_step
+    - trail_step = ATR_MULT × current_atr + buffer (adaptive)
+    - يُفعَّل فقط إذا trailing_active = True (بعد TP1)
+    - حد أقصى TRAILING_MAX_UPDATES لمنع loop لا نهائي
+
+    يُرجع:
+      {"status": "updated",     "new_stop": float}  ← تم تحديث الـ stop
+      {"status": "no_change",   "new_stop": float}  ← لا تغيير
+      {"status": "not_active"}                       ← trailing غير مفعّل
+      {"status": "max_reached"}                      ← وصل للحد الأقصى
+    """
+    if not trade.trailing_active:
+        return {"status": "not_active"}
+
+    max_updates = getattr(_config, "TRAILING_MAX_UPDATES", 200)
+    if trade.trail_update_count >= max_updates:
+        return {"status": "max_reached"}
+
+    try:
+        # ── احسب trail_step ديناميكياً من ATR الحالي
+        atr_mult = getattr(_config, "TRAILING_ATR_MULT", 0.5)
+        buf_pct  = getattr(_config, "TRAILING_BUFFER_PCT", 0.001)
+        tf       = getattr(_config, "TRAILING_ATR_TIMEFRAME", "15Min")
+
+        # جلب ATR الحالي (يتجاوز ATR الفتح إذا تغير التقلب)
+        live_atr = get_current_atr(trade.ticker, timeframe=tf)
+        if live_atr > 0:
+            trade.current_atr = live_atr   # تحديث ATR في الـ trade
+
+        effective_atr = trade.current_atr if trade.current_atr > 0 else trade.trail_step
+        if effective_atr <= 0:
+            return {"status": "no_change", "new_stop": trade.stop_loss}
+
+        buffer     = buf_pct * current_price
+        trail_step = round(atr_mult * effective_atr + buffer, 4)
+
+        if trade.side == "long":
+            # تحديث أعلى سعر
+            if current_price > trade.highest_price:
+                trade.highest_price = current_price
+
+            new_stop = round(trade.highest_price - trail_step, 4)
+
+            # فقط إذا الـ stop الجديد أعلى من القديم (لا ننزل الـ stop أبداً)
+            if new_stop > trade.stop_loss:
+                trade.stop_loss          = new_stop
+                trade.trail_update_count += 1
+                print(f"  📈 Trailing LONG {trade.ticker}: highest=${trade.highest_price:.2f} | "
+                      f"trail={trail_step:.4f} | new_stop=${new_stop:.2f} [#{trade.trail_update_count}]")
+                return {"status": "updated", "new_stop": new_stop}
+
+        elif trade.side == "short":
+            # تحديث أدنى سعر
+            if current_price < trade.lowest_price:
+                trade.lowest_price = current_price
+
+            new_stop = round(trade.lowest_price + trail_step, 4)
+
+            # فقط إذا الـ stop الجديد أقل من القديم (لا نرفع الـ stop أبداً)
+            if new_stop < trade.stop_loss:
+                trade.stop_loss          = new_stop
+                trade.trail_update_count += 1
+                print(f"  📉 Trailing SHORT {trade.ticker}: lowest=${trade.lowest_price:.2f} | "
+                      f"trail={trail_step:.4f} | new_stop=${new_stop:.2f} [#{trade.trail_update_count}]")
+                return {"status": "updated", "new_stop": new_stop}
+
+        return {"status": "no_change", "new_stop": trade.stop_loss}
+
+    except Exception as e:
+        print(f"  ⚠️  خطأ في Trailing Stop لـ {trade.ticker}: {e}")
+        return {"status": "no_change", "new_stop": trade.stop_loss}
 
 
 def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
@@ -944,6 +1035,12 @@ def open_meanrev_trade(
         tp1_hit=False,
         peak_price=signal.entry_price,
         risk_amount=sizing["risk_amount"],
+        # ── Trailing متقدم — ATR الفتح
+        current_atr=getattr(signal, "atr", 0.0),
+        highest_price=signal.entry_price,
+        lowest_price=signal.entry_price,
+        trailing_active=False,
+        trail_update_count=0,
     )
 
 
@@ -1010,32 +1107,23 @@ def monitor_trade(trade: OpenTrade) -> dict:
         return {"status": "target", "price": current_price,
                 "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
 
-    # ── Trailing Stop بعد TP1
-    if trade.tp1_hit and trade.trail_step > 0:
-        if trade.side == "long":
-            new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
-            if new_stop > trade.stop_loss:
-                return {"status": "trail_updated", "price": current_price,
-                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
-        elif trade.side == "short":
-            new_stop = trade.stop_loss - trade.trail_step
-            if current_price < trade.stop_loss - trade.trail_step:
-                new_stop = current_price + trade.trail_step
-                if new_stop < trade.stop_loss:
-                    return {"status": "trail_updated", "price": current_price,
-                            "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+    # ── Trailing Stop بعد TP1 (ATR ديناميكي)
+    if trade.tp1_hit and trade.trailing_active:
+        trail_result = update_trailing_stop(trade, current_price)
+        if trail_result["status"] == "updated":
+            return {"status": "trail_updated", "price": current_price,
+                    "r": r_current, "new_stop": trail_result["new_stop"], "exit_qty": 0}
 
     # ── تحريك الوقف للتعادل قبل TP1 إذا تجاوز السعر 1.5R
-    # يحمي الصفقة من الانعكاس قبل الوصول لـ TP1
     if not trade.tp1_hit and r_current >= 1.5:
-        risk    = abs(trade.entry_price - trade.stop_loss)
+        risk = abs(trade.entry_price - trade.stop_loss)
         if trade.side == "long":
-            breakeven_stop = trade.entry_price + (risk * 0.2)  # +0.2R فوق التعادل
+            breakeven_stop = trade.entry_price + (risk * 0.2)
             if breakeven_stop > trade.stop_loss:
                 return {"status": "trail_updated", "price": current_price,
                         "r": r_current, "new_stop": round(breakeven_stop, 2), "exit_qty": 0}
         else:
-            breakeven_stop = trade.entry_price - (risk * 0.2)  # -0.2R تحت التعادل (SHORT)
+            breakeven_stop = trade.entry_price - (risk * 0.2)
             if breakeven_stop < trade.stop_loss:
                 return {"status": "trail_updated", "price": current_price,
                         "r": r_current, "new_stop": round(breakeven_stop, 2), "exit_qty": 0}
