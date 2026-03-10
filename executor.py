@@ -798,6 +798,21 @@ def open_meanrev_trade(
     balance      = account.get("balance", balance) if account else balance
     buying_power = account.get("buying_power", 0) if account else 0
 
+    # ── فحص حرج: هل السهم مفتوح مسبقاً في Alpaca؟
+    # نتحقق مباشرةً من Alpaca لا من open_trades لأن open_trades قد تكون قديمة
+    try:
+        pos_check = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions/{signal.ticker}",
+            headers=HEADERS, timeout=8,
+        )
+        if pos_check.status_code == 200:
+            existing_qty = abs(int(float(pos_check.json().get("qty", 0))))
+            if existing_qty > 0:
+                print(f"⛔ رُفض {signal.ticker} — موجود مسبقاً في Alpaca (qty={existing_qty})")
+                return None
+    except Exception as e:
+        print(f"⚠️  فشل فحص الـ position لـ {signal.ticker}: {e}")
+
     # ── حساب نسبة المخاطرة الديناميكية من الـ Score
     from risk import dynamic_risk_pct
     sig_score    = getattr(signal, "score", 0)
