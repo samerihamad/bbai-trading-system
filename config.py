@@ -127,7 +127,8 @@ MOM_VWAP_BUFFER    = 0.002   # 0.2% فوق/تحت VWAP كهامش
 # ─────────────────────────────────────────
 # Trailing Stop — إعدادات متقدمة
 # ─────────────────────────────────────────
-TRAILING_ATR_MULT        = 0.5    # trail_step = 0.5 × ATR (adaptive مع التقلب)
+TRAILING_ATR_MULT        = 0.5    # trail_step = 0.5 × ATR للـ MeanRev (adaptive مع التقلب)
+TRAILING_ATR_MULT_MOM    = 0.6    # trail_step = 0.6 × ATR للـ Momentum (أوسع لأن الزخم يحتاج مساحة)
 TRAILING_BUFFER_PCT      = 0.001  # 0.1% هامش إضافي لتجنب الـ noise
 TRAILING_START_AFTER_TP1 = True   # يبدأ الـ trailing بعد TP1 فقط
 TRAILING_ATR_TIMEFRAME   = "15Min" # التايم فريم لجلب ATR الديناميكي
