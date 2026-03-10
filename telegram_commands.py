@@ -245,30 +245,29 @@ def _handle_command(command: str, context: dict):
                         pnl = round(pnl, 2)
                         risk = getattr(trade, "risk_amount", 0)
                         r_multiple = round(pnl / risk, 2) if risk > 0 else 0.0
+                        qty = trade.quantity
 
                         if pnl >= 0:
                             if risk_manager:
-                                risk_manager.daily_wins += 1
+                                risk_manager.record_win(pnl, r_multiple)
                             notify_trade_win(
                                 ticker=trade.ticker,
-                                side=trade.side,
-                                entry=trade.entry_price,
+                                entry_price=trade.entry_price,
                                 exit_price=current_price,
-                                pnl=pnl,
-                                r_multiple=r_multiple,
-                                exit_reason="Manual /closeall",
+                                quantity=qty,
+                                profit=pnl,
+                                r_achieved=r_multiple,
                             )
                         else:
                             if risk_manager:
-                                risk_manager.record_loss()
+                                risk_manager.record_loss(pnl, r_multiple)
                             notify_trade_loss(
                                 ticker=trade.ticker,
-                                side=trade.side,
-                                entry=trade.entry_price,
+                                entry_price=trade.entry_price,
                                 exit_price=current_price,
-                                pnl=pnl,
-                                r_multiple=r_multiple,
-                                exit_reason="Manual /closeall",
+                                quantity=qty,
+                                loss=abs(pnl),
+                                daily_losses=risk_manager.daily_losses if risk_manager else 0,
                             )
                     except Exception as e:
                         _send(f"⚠️ خطأ في حساب P&L لـ {trade.ticker}: {e}")
