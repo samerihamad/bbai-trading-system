@@ -275,14 +275,13 @@ def _handle_command(command: str, context: dict):
                 # ── إغلاق كل المراكز في Alpaca
                 success = close_all_positions()
 
-                # ── مسح الذاكرة و Sheets
-                open_trades.clear()
-                try:
-                    _delete_open_trades_sheets()
-                except Exception:
-                    pass
-
                 if success:
+                    # ── مسح الذاكرة و Sheets فقط عند النجاح الفعلي
+                    open_trades.clear()
+                    try:
+                        _delete_open_trades_sheets()
+                    except Exception:
+                        pass
                     _send(
                         "✅ <b>تم إغلاق كل المراكز</b>\n"
                         "━━━━━━━━━━━━━━━━━━\n"
@@ -290,7 +289,12 @@ def _handle_command(command: str, context: dict):
                         "🇦🇪 تم إغلاق جميع الصفقات بنجاح."
                     )
                 else:
-                    _send("⚠️ فشل إغلاق بعض المراكز — تحقق من Alpaca يدوياً.")
+                    _send(
+                        "⚠️ <b>فشل إغلاق بعض المراكز</b>\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        "🔴 لا تزال هناك مراكز مفتوحة في Alpaca.\n"
+                        "➡️ تحقق من Alpaca وأغلقها يدوياً إذا لزم الأمر."
+                    )
             except Exception as e:
                 _send(f"❌ خطأ في إغلاق المراكز: {e}")
 
