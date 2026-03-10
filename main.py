@@ -32,7 +32,7 @@ from executor         import (
     monitor_trade,
     place_market_sell,
     close_all_positions,
-    get_position_qty_available,
+    update_stop_loss_alpaca,
     _save_open_trades,
     _delete_open_trades_sheets,
     OpenTrade,
@@ -55,24 +55,18 @@ from telegram_commands import (
     notify_error,
 )
 
-TZ     = pytz.timezone(TIMEZONE)
-UTC_TZ = pytz.utc
+TZ = pytz.timezone(TIMEZONE)
 
-
-def get_ny_time() -> datetime:
-    """
-    يأخذ الوقت الحالي بـ UTC أولاً ثم يحوّله لنيويورك.
-    هذه الطريقة مضمونة بغض النظر عن timezone إعدادات السيرفر.
-    datetime.now(TZ) تعتمد على ساعة النظام — datetime.now(UTC) دائماً صحيح.
-    """
-    return datetime.now(UTC_TZ).astimezone(TZ)
+# -----------------------------------------
+# الحالة العامة للنظام
+# -----------------------------------------
 
 risk_manager : DailyRiskManager = DailyRiskManager()
 open_trades  : list              = []
 daily_stocks : dict              = {}
-last_no_opp  : datetime          = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
-last_scan    : datetime          = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
-last_universe_refresh : datetime = datetime.now(UTC_TZ).astimezone(TZ) - timedelta(hours=2)
+last_no_opp  : datetime          = datetime.now(TZ) - timedelta(hours=2)
+last_scan    : datetime          = datetime.now(TZ) - timedelta(hours=2)
+last_universe_refresh : datetime = datetime.now(TZ) - timedelta(hours=2)
 SCAN_INTERVAL_MIN     : int      = 5    # فحص الإشارات كل 5 دقائق
 UNIVERSE_REFRESH_MIN  : int      = 60   # تحديث قائمة الأسهم كل ساعة
 
@@ -80,7 +74,6 @@ _pre_market_done  : bool = False
 _pre_alert_done   : bool = False
 _close_done      : bool = False
 _current_day     : str  = ""
-_daily_trade_num : int  = 0   # عداد الصفقات اليومية لرقم الصفقة في Telegram
 
 # تتبع الأخطاء المتكررة لإرسال إشعار مرة واحدة فقط
 _consecutive_errors : int  = 0
@@ -92,8 +85,12 @@ _error_notified     : bool = False
 # -----------------------------------------
 
 def log(msg: str):
-    now = get_ny_time().strftime("%Y-%m-%d %H:%M:%S %Z")
+    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     print(f"[{now}]  {msg}", flush=True)
+
+
+def get_ny_time() -> datetime:
+    return datetime.now(TZ)
 
 
 def is_weekday() -> bool:
@@ -135,14 +132,13 @@ def is_close_time() -> bool:
 
 
 def check_new_day():
-    global _pre_market_done, _close_done, _current_day, _pre_alert_done, _daily_trade_num
+    global _pre_market_done, _close_done, _current_day, _pre_alert_done
     today = get_ny_time().strftime("%Y-%m-%d")
     if today != _current_day:
         _current_day     = today
         _pre_market_done = False
         _pre_alert_done  = False
         _close_done      = False
-        _daily_trade_num = 0
         log(f"New trading day: {today} -- flags reset")
 
 
@@ -150,9 +146,7 @@ def get_system_context() -> dict:
     """
     تُرجع الحالة الحالية للنظام.
     يستخدمها telegram_commands.py لأمر /status.
-    global صريح لتجنب UnboundLocalError عند القراءة من thread مختلف.
     """
-    global _pre_market_done, _pre_alert_done, _close_done
     return {
         "open_trades":     open_trades,
         "risk_manager":    risk_manager,
@@ -268,24 +262,9 @@ def monitor_open_trades():
             side   = trade.side
 
             if status == "stopped":
-                # ── الكمية الصحيحة: بعد TP1 نستخدم quantity_remaining فقط
-                if trade.tp1_hit:
-                    exit_qty = trade.quantity_remaining
-                else:
-                    exit_qty = result.get("exit_qty", trade.quantity)
-                log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty} | tp1_hit={trade.tp1_hit}")
-
-                # ── تحقق من الكمية الفعلية — Alpaca bracket ربما نفّذ SL تلقائياً
-                available = get_position_qty_available(trade.ticker)
-                if available == 0:
-                    log(f"ℹ️  STOP {trade.ticker}: Alpaca نفّذ الإغلاق تلقائياً — تحديث السجل فقط")
-                elif available < exit_qty:
-                    log(f"ℹ️  STOP {trade.ticker}: كمية متاحة ({available}) — تعديل من {exit_qty}")
-                    exit_qty = available
-                    place_market_sell(trade.ticker, exit_qty, side=side)
-                else:
-                    place_market_sell(trade.ticker, exit_qty, side=side)
-
+                exit_qty = result.get("exit_qty", trade.quantity)
+                log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty}")
+                place_market_sell(trade.ticker, exit_qty, side=side)
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
@@ -297,58 +276,32 @@ def monitor_open_trades():
                     target=trade.target, risk_amount=trade.risk_amount,
                     exit_reason="stopped", opened_at=trade.opened_at, side=side,
                 )
-
-                # ── تمييز WIN/LOSS/BREAKEVEN
-                # بعد TP1: الوقف انتقل للتعادل → الخروج عنده ربح أو تعادل وليس خسارة
-                if trade.tp1_hit and pnl >= 0:
-                    risk_manager.record_win(pnl, r)
-                    log(f"✅ STOP after TP1 = WIN/BREAKEVEN | pnl=${pnl:+.2f}")
-                    try:
-                        notify_trade_win(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=exit_qty,
-                            profit=pnl, r_achieved=r,
-                        )
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
-                else:
-                    stopped = risk_manager.record_loss(pnl, r)
-                    try:
-                        notify_trade_loss(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=exit_qty,
-                            loss=abs(pnl), daily_losses=risk_manager.daily_losses,
-                        )
-                        if stopped:
-                            notify_system_stopped()
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
+                stopped = risk_manager.record_loss(pnl, r)
+                try:
+                    notify_trade_loss(
+                        ticker=trade.ticker, entry_price=trade.entry_price,
+                        exit_price=price, quantity=exit_qty,
+                        loss=abs(pnl), daily_losses=risk_manager.daily_losses,
+                    )
+                    if stopped:
+                        notify_system_stopped()
+                except Exception as e:
+                    log(f"Telegram error: {e}")
                 trades_to_remove.append(trade)
 
             elif status == "tp1_hit":
                 tp1_qty  = result.get("exit_qty", trade.quantity // 2)
                 new_stop = result["new_stop"]
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
-
-                # ── تحقق من الكمية الفعلية المتاحة في Alpaca
-                # Bracket order ربما نفّذ TP1 تلقائياً → qty_available = 0
-                available = get_position_qty_available(trade.ticker)
-                if available < tp1_qty:
-                    log(f"ℹ️  TP1 {trade.ticker}: Alpaca نفّذ البيع تلقائياً (available={available}) — تحديث الحالة فقط")
-                    tp1_qty = available  # قد يكون 0 إذا نفّذه Alpaca بالكامل
-
-                if tp1_qty > 0:
-                    place_market_sell(trade.ticker, tp1_qty, side=side)
-
+                place_market_sell(trade.ticker, tp1_qty, side=side)
                 pnl_tp1 = round(
-                    (price - trade.entry_price) * result.get("exit_qty", trade.quantity // 2) if side == "long"
-                    else (trade.entry_price - price) * result.get("exit_qty", trade.quantity // 2), 2
+                    (price - trade.entry_price) * tp1_qty if side == "long"
+                    else (trade.entry_price - price) * tp1_qty, 2
                 )
                 record_trade(
                     ticker=trade.ticker, strategy=trade.strategy,
                     entry_price=trade.entry_price, exit_price=price,
-                    quantity=result.get("exit_qty", trade.quantity // 2),
-                    stop_loss=trade.stop_loss,
+                    quantity=tp1_qty, stop_loss=trade.stop_loss,
                     target=trade.target_tp1, risk_amount=trade.risk_amount / 2,
                     exit_reason="tp1", opened_at=trade.opened_at, side=side,
                 )
@@ -356,7 +309,7 @@ def monitor_open_trades():
                 try:
                     notify_trade_win(
                         ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=result.get("exit_qty", trade.quantity // 2),
+                        exit_price=price, quantity=tp1_qty,
                         profit=pnl_tp1, r_achieved=r,
                     )
                     notify_stop_updated(
@@ -367,23 +320,17 @@ def monitor_open_trades():
                     log(f"Telegram error: {e}")
                 trade.tp1_hit   = True
                 trade.stop_loss = new_stop
+                # ── تحديث الوقف الفعلي في Alpaca (نقل للتعادل)
+                try:
+                    update_stop_loss_alpaca(trade, new_stop)
+                except Exception as e:
+                    log(f"⚠️ فشل تحديث Stop في Alpaca لـ {trade.ticker}: {e}")
 
             elif status == "target":
                 exit_qty = result.get("exit_qty", trade.quantity_remaining if trade.tp1_hit else trade.quantity)
                 label    = "TP2" if trade.tp1_hit else "TARGET"
                 log(f"{label}: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f}")
-
-                # ── تحقق من الكمية الفعلية — Alpaca bracket ربما نفّذ TP2 تلقائياً
-                available = get_position_qty_available(trade.ticker)
-                if available == 0:
-                    log(f"ℹ️  {label} {trade.ticker}: Alpaca نفّذ الإغلاق تلقائياً — تحديث السجل فقط")
-                elif available < exit_qty:
-                    log(f"ℹ️  {label} {trade.ticker}: كمية متاحة ({available}) — تعديل من {exit_qty}")
-                    exit_qty = available
-                    place_market_sell(trade.ticker, exit_qty, side=side)
-                else:
-                    place_market_sell(trade.ticker, exit_qty, side=side)
-
+                place_market_sell(trade.ticker, exit_qty, side=side)
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
@@ -409,6 +356,11 @@ def monitor_open_trades():
             elif status == "trail_updated":
                 new_stop = result["new_stop"]
                 log(f"TRAIL: {trade.ticker} stop ${trade.stop_loss:.2f} -> ${new_stop:.2f}")
+                # ── تحديث الوقف الفعلي في Alpaca
+                try:
+                    update_stop_loss_alpaca(trade, new_stop)
+                except Exception as e:
+                    log(f"⚠️ فشل تحديث Trailing Stop في Alpaca لـ {trade.ticker}: {e}")
                 try:
                     notify_stop_updated(
                         ticker=trade.ticker, old_stop=trade.stop_loss,
@@ -468,7 +420,7 @@ def refresh_universe_if_needed():
 # -----------------------------------------
 
 def scan_for_signals():
-    global open_trades, last_no_opp, last_scan, _daily_trade_num
+    global open_trades, last_no_opp, last_scan
 
     if len(open_trades) >= MAX_TOTAL:
         return
@@ -498,7 +450,6 @@ def scan_for_signals():
             strategy = "momentum" if "MOM" in signal.reason else "meanrev"
             trade = open_meanrev_trade(signal, balance, strategy=strategy)
             if trade:
-                _daily_trade_num += 1
                 open_trades.append(trade)
                 _save_open_trades(open_trades)
                 found_signal = True
@@ -512,7 +463,6 @@ def scan_for_signals():
                         stop_loss=signal.stop_loss,
                         target=signal.target_tp2,
                         risk_amount=trade.risk_amount,
-                        trade_number=_daily_trade_num,
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
@@ -586,7 +536,6 @@ def run_market_close():
 
 def main():
     global _consecutive_errors, _error_notified
-    global _pre_market_done, _pre_alert_done, _close_done, _current_day, _daily_trade_num
 
     log("=" * 55)
     log("BBAI Trading System -- Starting")
