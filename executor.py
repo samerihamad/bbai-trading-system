@@ -393,22 +393,20 @@ def sync_with_alpaca(open_trades: list) -> list:
 
             else:
                 # ── الصفقة لا تزال مفتوحة — تحقق من الكمية
-                pos     = alpaca_positions[trade.ticker]
+                pos        = alpaca_positions[trade.ticker]
                 alpaca_qty = abs(int(float(pos.get("qty", trade.quantity))))
-
-                # الكمية الكلية المتوقعة = tp1 + tp2 = quantity
                 system_qty = trade.quantity
 
                 if alpaca_qty != system_qty and not trade.tp1_hit:
-                    # الكمية تغيّرت (ربما Alpaca نفّذ TP1 جزئياً)
                     if alpaca_qty < system_qty:
+                        # TP1 نُفِّذ جزئياً — الكمية المتبقية هي ما في Alpaca
                         diff = system_qty - alpaca_qty
-                        print(f"  🔄 {trade.ticker}: كمية Alpaca={alpaca_qty} < النظام={system_qty} → تحديث (TP1 جزئي؟ diff={diff})")
-                        trade.quantity          = alpaca_qty
-                        trade.quantity_remaining = alpaca_qty
+                        print(f"  🔄 {trade.ticker}: Alpaca={alpaca_qty} < النظام={system_qty} (diff={diff}) → TP1 جزئي")
+                        trade.quantity           = system_qty   # نُبقي الكمية الأصلية
+                        trade.quantity_remaining = alpaca_qty   # المتبقي = ما في Alpaca فعلاً
+                        trade.tp1_hit            = True         # نعتبر TP1 تحقق
                     elif alpaca_qty > system_qty:
-                        # نادر — ربما تعديل يدوي
-                        print(f"  ⚠️  {trade.ticker}: كمية Alpaca={alpaca_qty} > النظام={system_qty} — نُبقي قيمة النظام")
+                        print(f"  ⚠️  {trade.ticker}: Alpaca={alpaca_qty} > النظام={system_qty} — نُبقي قيمة النظام")
 
         if removed:
             print(f"🔄 Sync: أُغلق {len(removed)} صفقة بواسطة Alpaca: {removed}")
@@ -697,11 +695,11 @@ def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
     qty    = trade.quantity_remaining
 
     try:
-        # ── جلب الأوامر المعلقة للسهم
+        # ── جلب كل الأوامر المعلقة للسهم
         r = requests.get(
             f"{ALPACA_BASE_URL}/v2/orders",
             headers=HEADERS,
-            params={"symbols": ticker, "status": "open", "limit": 10},
+            params={"symbols": ticker, "status": "open", "limit": 20},
             timeout=10,
         )
         if r.status_code != 200:
@@ -709,21 +707,25 @@ def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
             return False
 
         orders = r.json()
-        stop_orders = [
-            o for o in orders
-            if o.get("type") in ("stop", "stop_limit")
-            and o.get("symbol") == ticker
-        ]
 
-        # إذا لم يجد أوامر stop معلقة، يُنشئ واحداً جديداً مباشرة
-        if not stop_orders:
-            print(f"  ℹ️  لا توجد أوامر Stop معلقة لـ {ticker} — إنشاء أمر جديد")
+        # ── إلغاء كل الأوامر المعلقة للسهم (bracket + stop + limit)
+        # ضروري لتحرير qty_available قبل وضع Stop جديد
+        cancelled = 0
+        for o in orders:
+            if o.get("symbol") != ticker:
+                continue
+            oid   = o.get("id", "")
+            otype = o.get("type", "")
+            oprice = float(o.get("stop_price") or o.get("limit_price") or 0)
+            if cancel_order(oid):
+                cancelled += 1
+                print(f"  🗑️  إلغاء أمر [{otype}] {oid[:8]}... @ ${oprice:.2f}")
 
-        # ── إلغاء أوامر الـ Stop القديمة
-        for o in stop_orders:
-            oid = o.get("id", "")
-            cancel_order(oid)
-            print(f"  🗑️  إلغاء Stop قديم {oid[:8]}... @ ${float(o.get('stop_price', 0)):.2f}")
+        if cancelled == 0:
+            print(f"  ℹ️  لا توجد أوامر معلقة لـ {ticker}")
+
+        # ── انتظر لحظة لتحرير qty_available في Alpaca
+        time.sleep(1)
 
         # ── إنشاء أمر Stop جديد
         close_side = "sell" if side == "long" else "buy"
@@ -733,7 +735,7 @@ def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
             "side":          close_side,
             "type":          "stop",
             "stop_price":    str(round(new_stop, 2)),
-            "time_in_force": "gtc",   # Good Till Cancelled
+            "time_in_force": "gtc",
         }
 
         resp = requests.post(
@@ -973,7 +975,7 @@ def monitor_trade(trade: OpenTrade) -> dict:
         return {"status": "target", "price": current_price,
                 "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
 
-    # ── Trailing Stop (يُفعَّل بعد TP1 للـ LONG والـ SHORT)
+    # ── Trailing Stop بعد TP1
     if trade.tp1_hit and trade.trail_step > 0:
         if trade.side == "long":
             new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
@@ -981,13 +983,27 @@ def monitor_trade(trade: OpenTrade) -> dict:
                 return {"status": "trail_updated", "price": current_price,
                         "r": r_current, "new_stop": new_stop, "exit_qty": 0}
         elif trade.side == "short":
-            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
             new_stop = trade.stop_loss - trade.trail_step
             if current_price < trade.stop_loss - trade.trail_step:
                 new_stop = current_price + trade.trail_step
                 if new_stop < trade.stop_loss:
                     return {"status": "trail_updated", "price": current_price,
                             "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+
+    # ── تحريك الوقف للتعادل قبل TP1 إذا تجاوز السعر 1.5R
+    # يحمي الصفقة من الانعكاس قبل الوصول لـ TP1
+    if not trade.tp1_hit and r_current >= 1.5:
+        risk    = abs(trade.entry_price - trade.stop_loss)
+        if trade.side == "long":
+            breakeven_stop = trade.entry_price + (risk * 0.2)  # +0.2R فوق التعادل
+            if breakeven_stop > trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": round(breakeven_stop, 2), "exit_qty": 0}
+        else:
+            breakeven_stop = trade.entry_price - (risk * 0.2)  # -0.2R تحت التعادل (SHORT)
+            if breakeven_stop < trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": round(breakeven_stop, 2), "exit_qty": 0}
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
