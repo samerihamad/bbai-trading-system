@@ -288,6 +288,7 @@ def sync_with_alpaca(open_trades: list) -> list:
     """
     يكتشف الصفقات المغلقة في Alpaca (تلقائياً عبر Bracket أو يدوياً)
     ويرسل إشعار Telegram مع PnL ويسجّلها في Sheets.
+    يتحقق أيضاً من الكميات ويُحدّثها إذا اختلفت.
     """
     if not open_trades:
         return open_trades
@@ -295,16 +296,20 @@ def sync_with_alpaca(open_trades: list) -> list:
         r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
         if r.status_code != 200:
             return open_trades
-        alpaca_symbols = {pos.get("symbol", "") for pos in r.json()}
+
+        # بناء خريطة: ticker → position data
+        alpaca_positions = {pos.get("symbol", ""): pos for pos in r.json()}
+        alpaca_symbols   = set(alpaca_positions.keys())
         removed = []
 
         for trade in open_trades[:]:
             if trade.ticker not in alpaca_symbols:
+                # ── الصفقة مغلقة في Alpaca
                 open_trades.remove(trade)
                 removed.append(trade.ticker)
 
-                # ── محاولة جلب آخر سعر تنفيذ من Alpaca Orders
-                exit_price  = trade.entry_price   # fallback
+                # محاولة جلب آخر سعر تنفيذ من Alpaca Orders
+                exit_price  = trade.entry_price
                 exit_reason = "closed_alpaca"
                 try:
                     ord_r = requests.get(
@@ -314,12 +319,9 @@ def sync_with_alpaca(open_trades: list) -> list:
                         timeout=10,
                     )
                     if ord_r.status_code == 200:
-                        orders = ord_r.json()
-                        # أحدث أمر مكتمل هو أمر الإغلاق
-                        for o in orders:
+                        for o in ord_r.json():
                             if o.get("status") == "filled" and o.get("filled_avg_price"):
                                 exit_price  = float(o["filled_avg_price"])
-                                # حدد سبب الإغلاق من نوع الأمر الأب
                                 otype = o.get("order_class", "")
                                 if "bracket" in otype or o.get("type") in ("stop", "stop_limit"):
                                     exit_reason = "stop_loss_alpaca"
@@ -329,19 +331,19 @@ def sync_with_alpaca(open_trades: list) -> list:
                 except Exception:
                     pass
 
-                # ── حساب PnL
+                # حساب PnL
                 qty = getattr(trade, "quantity_remaining", trade.quantity)
                 if trade.side == "long":
                     pnl = round((exit_price - trade.entry_price) * qty, 2)
                 else:
                     pnl = round((trade.entry_price - exit_price) * qty, 2)
 
-                risk = abs(trade.entry_price - trade.stop_loss)
+                risk  = abs(trade.entry_price - trade.stop_loss)
                 r_val = round(pnl / (risk * qty), 2) if risk > 0 and qty > 0 else 0.0
 
-                print(f"  🔔 {trade.ticker} أُغلقت تلقائياً | exit=${exit_price:.2f} | PnL=${pnl:+.2f} | {r_val:+.2f}R")
+                print(f"  🔔 {trade.ticker} أُغلقت | exit=${exit_price:.2f} | PnL=${pnl:+.2f} | {r_val:+.2f}R")
 
-                # ── تسجيل في Sheets
+                # تسجيل في Sheets
                 try:
                     from reporter import record_trade
                     record_trade(
@@ -360,7 +362,7 @@ def sync_with_alpaca(open_trades: list) -> list:
                 except Exception as e:
                     print(f"  ⚠️  فشل تسجيل {trade.ticker} في Sheets: {e}")
 
-                # ── إشعار Telegram
+                # إشعار Telegram
                 try:
                     from notifier import notify_trade_win, notify_trade_loss
                     duration = ""
@@ -372,7 +374,6 @@ def sync_with_alpaca(open_trades: list) -> list:
                         oa   = trade.opened_at if hasattr(trade.opened_at, "tzinfo") else TZ_.localize(trade.opened_at)
                         mins = int((now_ - oa).total_seconds() / 60)
                         duration = f"{mins}d" if mins >= 1440 else f"{mins}m"
-
                     if pnl >= 0:
                         notify_trade_win(
                             ticker=trade.ticker, side=trade.side,
@@ -389,6 +390,25 @@ def sync_with_alpaca(open_trades: list) -> list:
                         )
                 except Exception as e:
                     print(f"  ⚠️  فشل إشعار Telegram لـ {trade.ticker}: {e}")
+
+            else:
+                # ── الصفقة لا تزال مفتوحة — تحقق من الكمية
+                pos     = alpaca_positions[trade.ticker]
+                alpaca_qty = abs(int(float(pos.get("qty", trade.quantity))))
+
+                # الكمية الكلية المتوقعة = tp1 + tp2 = quantity
+                system_qty = trade.quantity
+
+                if alpaca_qty != system_qty and not trade.tp1_hit:
+                    # الكمية تغيّرت (ربما Alpaca نفّذ TP1 جزئياً)
+                    if alpaca_qty < system_qty:
+                        diff = system_qty - alpaca_qty
+                        print(f"  🔄 {trade.ticker}: كمية Alpaca={alpaca_qty} < النظام={system_qty} → تحديث (TP1 جزئي؟ diff={diff})")
+                        trade.quantity          = alpaca_qty
+                        trade.quantity_remaining = alpaca_qty
+                    elif alpaca_qty > system_qty:
+                        # نادر — ربما تعديل يدوي
+                        print(f"  ⚠️  {trade.ticker}: كمية Alpaca={alpaca_qty} > النظام={system_qty} — نُبقي قيمة النظام")
 
         if removed:
             print(f"🔄 Sync: أُغلق {len(removed)} صفقة بواسطة Alpaca: {removed}")
@@ -659,6 +679,83 @@ def cancel_order(order_id: str) -> bool:
         return False
 
 
+def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
+    """
+    يحدّث وقف الخسارة الفعلي في Alpaca للصفقة المفتوحة.
+
+    الآلية:
+    1. يجلب الأوامر المعلقة للسهم
+    2. يلغي أوامر الـ Stop الموجودة
+    3. يضع أمر Stop جديد بالسعر المحدّث
+
+    يُستخدم عند:
+    - نقل الوقف للتعادل بعد TP1
+    - تحريك الـ Trailing Stop
+    """
+    ticker = trade.ticker
+    side   = trade.side
+    qty    = trade.quantity_remaining
+
+    try:
+        # ── جلب الأوامر المعلقة للسهم
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            params={"symbols": ticker, "status": "open", "limit": 10},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"⚠️  فشل جلب أوامر {ticker}: {r.status_code}")
+            return False
+
+        orders = r.json()
+        stop_orders = [
+            o for o in orders
+            if o.get("type") in ("stop", "stop_limit")
+            and o.get("symbol") == ticker
+        ]
+
+        # إذا لم يجد أوامر stop معلقة، يُنشئ واحداً جديداً مباشرة
+        if not stop_orders:
+            print(f"  ℹ️  لا توجد أوامر Stop معلقة لـ {ticker} — إنشاء أمر جديد")
+
+        # ── إلغاء أوامر الـ Stop القديمة
+        for o in stop_orders:
+            oid = o.get("id", "")
+            cancel_order(oid)
+            print(f"  🗑️  إلغاء Stop قديم {oid[:8]}... @ ${float(o.get('stop_price', 0)):.2f}")
+
+        # ── إنشاء أمر Stop جديد
+        close_side = "sell" if side == "long" else "buy"
+        new_order = {
+            "symbol":        ticker,
+            "qty":           str(qty),
+            "side":          close_side,
+            "type":          "stop",
+            "stop_price":    str(round(new_stop, 2)),
+            "time_in_force": "gtc",   # Good Till Cancelled
+        }
+
+        resp = requests.post(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            json=new_order,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            oid = resp.json().get("id", "")[:8]
+            print(f"  ✅ Stop جديد لـ {ticker} @ ${new_stop:.2f} | qty={qty} | ID:{oid}...")
+            return True
+        else:
+            msg = resp.json().get("message", "خطأ")
+            print(f"  ❌ فشل إنشاء Stop جديد لـ {ticker}: {msg}")
+            return False
+
+    except Exception as e:
+        print(f"❌ خطأ في تحديث Stop لـ {ticker}: {e}")
+        return False
+
+
 # ─────────────────────────────────────────
 # 4. فتح الصفقات
 # ─────────────────────────────────────────
@@ -698,6 +795,12 @@ def open_meanrev_trade(
     total_qty = sizing["quantity"]
     tp1_qty   = max(1, total_qty // 2)
     tp2_qty   = total_qty - tp1_qty
+
+    # ── فحص مبكر: نحتاج كمية ≥ 2 لتقسيم TP1/TP2
+    # إذا كانت buying_power لا تكفي حتى لسهمين — نرفض الصفقة
+    if total_qty < 2:
+        print(f"⛔ رُفضت الصفقة — الكمية {total_qty} < 2 (buying_power غير كافٍ لتقسيم TP1/TP2)")
+        return None
 
     side_label     = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
     quality        = getattr(signal, "signal_quality", "standard").upper()
