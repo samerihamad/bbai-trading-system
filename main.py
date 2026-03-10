@@ -80,6 +80,7 @@ _flags = {
     "pre_market_done": False,
     "pre_alert_done":  False,
     "close_done":      False,
+    "daily_trade_num": 0,       # عداد صفقات اليوم
 }
 
 # تتبع الأخطاء المتكررة لإرسال إشعار مرة واحدة فقط
@@ -143,9 +144,10 @@ def check_new_day():
     today = get_ny_time().strftime("%Y-%m-%d")
     if today != _current_day:
         _current_day     = today
-        _flags["pre_market_done"] = False
-        _flags["pre_alert_done"] = False
-        _flags["close_done"] = False
+        _flags["pre_market_done"]  = False
+        _flags["pre_alert_done"]   = False
+        _flags["close_done"]       = False
+        _flags["daily_trade_num"]  = 0
         log(f"New trading day: {today} -- flags reset")
 
 
@@ -492,6 +494,7 @@ def scan_for_signals():
                 open_trades.append(trade)
                 _save_open_trades(open_trades)
                 found_signal = True
+                _flags["daily_trade_num"] += 1
                 try:
                     notify_trade_open(
                         ticker=signal.ticker,
@@ -506,7 +509,7 @@ def scan_for_signals():
                         target_tp2=signal.target_tp2,
                         qty_tp1=trade.quantity - trade.quantity_remaining,
                         qty_tp2=trade.quantity_remaining,
-                        trade_number=_daily_trade_num,
+                        trade_number=_flags["daily_trade_num"],
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
