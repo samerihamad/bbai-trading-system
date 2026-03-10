@@ -303,6 +303,10 @@ def sync_with_alpaca(open_trades: list) -> list:
         removed = []
 
         for trade in open_trades[:]:
+            # ── تجاهل الصفقات التي يعالجها monitor_open_trades حالياً
+            if getattr(trade, "closing_in_progress", False):
+                continue
+
             if trade.ticker not in alpaca_symbols:
                 # ── الصفقة مغلقة في Alpaca
                 open_trades.remove(trade)
@@ -468,6 +472,7 @@ class OpenTrade:
     peak_price:          float     # أعلى سعر بعد الدخول (LONG) أو أدنى سعر (SHORT)
     risk_amount:         float
     opened_at:           datetime  = None
+    closing_in_progress: bool      = False  # علامة: النظام يعالج الإغلاق — sync يتجاهلها
 
     def __post_init__(self):
         if self.opened_at is None:
