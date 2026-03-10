@@ -33,11 +33,6 @@ RISK_PER_TRADE     = 0.03    # 3% من الرصيد الحالي لكل صفقة
 MAX_DAILY_LOSSES   = 2       # إيقاف النظام بعد خسارتين في اليوم
 STRATEGY2_LEVERAGE = 2.0     # رافعة مالية × 2
 
-# Slippage: تكلفة التنفيذ الفعلي لكل سهم (دخول + خروج)
-# Alpaca بدون commission — لكن slippage حقيقي من bid/ask spread
-# $0.02 لكل سهم = $0.01 دخول + $0.01 خروج (محافظ للأسهم السائلة)
-SLIPPAGE_PER_SHARE = 0.02
-
 # ─────────────────────────────────────────
 # 4. اختيار الأسهم (Universe)
 # ─────────────────────────────────────────
@@ -128,3 +123,12 @@ MOM_ATR_MULT_STOP  = 1.0     # وقف الخسارة = 1× ATR (أضيق من Me
 MOM_TP1_R          = 1.5     # الهدف الأول = 1.5R
 MOM_TP2_R          = 3.0     # الهدف الثاني = 3R (الزخم يستمر)
 MOM_VWAP_BUFFER    = 0.002   # 0.2% فوق/تحت VWAP كهامش
+
+# ─────────────────────────────────────────
+# Trailing Stop — إعدادات متقدمة
+# ─────────────────────────────────────────
+TRAILING_ATR_MULT        = 0.5    # trail_step = 0.5 × ATR (adaptive مع التقلب)
+TRAILING_BUFFER_PCT      = 0.001  # 0.1% هامش إضافي لتجنب الـ noise
+TRAILING_START_AFTER_TP1 = True   # يبدأ الـ trailing بعد TP1 فقط
+TRAILING_ATR_TIMEFRAME   = "15Min" # التايم فريم لجلب ATR الديناميكي
+TRAILING_MAX_UPDATES     = 200    # حد أقصى لتحديثات الـ trailing لتجنب loop لا نهائي
