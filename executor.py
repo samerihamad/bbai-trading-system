@@ -284,6 +284,10 @@ def get_open_positions() -> list:
         return []
 
 
+# تتبع التحذيرات المطبوعة لتجنب التكرار كل 30 ثانية
+_qty_warned: set = set()   # {ticker} — طُبع تحذير الكمية لهذه الصفقة
+
+
 def sync_with_alpaca(open_trades: list) -> list:
     """
     يكتشف الصفقات المغلقة في Alpaca (تلقائياً عبر Bracket أو يدوياً)
@@ -406,13 +410,22 @@ def sync_with_alpaca(open_trades: list) -> list:
                         # TP1 نُفِّذ جزئياً — الكمية المتبقية هي ما في Alpaca
                         diff = system_qty - alpaca_qty
                         print(f"  🔄 {trade.ticker}: Alpaca={alpaca_qty} < النظام={system_qty} (diff={diff}) → TP1 جزئي")
-                        trade.quantity           = system_qty   # نُبقي الكمية الأصلية
-                        trade.quantity_remaining = alpaca_qty   # المتبقي = ما في Alpaca فعلاً
-                        trade.tp1_hit            = True         # نعتبر TP1 تحقق
+                        trade.quantity           = system_qty
+                        trade.quantity_remaining = alpaca_qty
+                        trade.tp1_hit            = True
+                        _qty_warned.discard(trade.ticker)
                     elif alpaca_qty > system_qty:
-                        print(f"  ⚠️  {trade.ticker}: Alpaca={alpaca_qty} > النظام={system_qty} — نُبقي قيمة النظام")
+                        # Alpaca عنده أكثر — نُحدّث النظام بالقيمة الفعلية (مرة واحدة فقط)
+                        if trade.ticker not in _qty_warned:
+                            _qty_warned.add(trade.ticker)
+                            half = alpaca_qty // 2
+                            trade.quantity           = alpaca_qty
+                            trade.quantity_remaining = alpaca_qty - half
+                            print(f"  🔄 {trade.ticker}: تصحيح الكمية → {alpaca_qty} (tp1={half}, tp2={alpaca_qty-half})")
 
         if removed:
+            for t in removed:
+                _qty_warned.discard(t)
             print(f"🔄 Sync: أُغلق {len(removed)} صفقة بواسطة Alpaca: {removed}")
 
     except Exception as e:
