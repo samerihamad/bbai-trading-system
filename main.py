@@ -479,7 +479,33 @@ def scan_for_signals():
             log("Could not fetch account -- skipping scan")
             return
 
+        # ── طبقة حماية: جلب المراكز الفعلية من Alpaca الآن
+        # يمنع فتح صفقة على سهم موجود حتى لو open_trades فارغة
+        try:
+            import requests as _req
+            from config import ALPACA_BASE_URL, ALPACA_API_KEY, ALPACA_SECRET_KEY
+            _headers = {
+                "APCA-API-KEY-ID":     ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+            }
+            r_pos = _req.get(f"{ALPACA_BASE_URL}/v2/positions", headers=_headers, timeout=8)
+            alpaca_live_tickers = set()
+            if r_pos.status_code == 200:
+                alpaca_live_tickers = {p.get("symbol", "") for p in r_pos.json()}
+
+            open_tickers_system = {t.ticker for t in open_trades}
+            ghost_tickers = alpaca_live_tickers - open_tickers_system
+            if ghost_tickers:
+                log(f"⚠️  مراكز في Alpaca لكن غير موجودة في النظام: {ghost_tickers} — سيُحظر فتح أي منها")
+        except Exception:
+            alpaca_live_tickers = {t.ticker for t in open_trades}
+            ghost_tickers = set()
+
         current_positions = {t.ticker: (t.side, t.strategy) for t in open_trades}
+        # أضف الـ ghost tickers لـ current_positions لمنع selector من اختيارها
+        for gt in ghost_tickers:
+            current_positions[gt] = ("unknown", "unknown")
+
         balance           = account["balance"]
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
