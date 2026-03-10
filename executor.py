@@ -62,7 +62,9 @@ def _get_open_trades_ws():
                 "entry_price","stop_loss","target",
                 "target_tp1","target_tp2","trail_stop","trail_step",
                 "quantity","quantity_remaining","tp1_hit",
-                "peak_price","risk_amount","opened_at"
+                "peak_price","risk_amount","opened_at",
+                "trailing_active","highest_price","lowest_price",
+                "current_atr","trail_update_count","tp1_pnl"
             ]
             ws = ss.add_worksheet(title=OPEN_TRADES_SHEET, rows=100, cols=len(headers))
             ws.append_row(headers)
@@ -87,7 +89,11 @@ def _save_open_trades(trades: list) -> None:
                 t.target_tp1, t.target_tp2,
                 t.trail_stop, t.trail_step,
                 t.quantity, t.quantity_remaining,
-                str(t.tp1_hit), t.peak_price, t.risk_amount, opened_at
+                str(t.tp1_hit), t.peak_price, t.risk_amount, opened_at,
+                str(t.trailing_active),
+                t.highest_price, t.lowest_price,
+                t.current_atr, t.trail_update_count,
+                t.tp1_pnl,
             ], value_input_option="RAW")
         print(f"✅ حُفظت {len(trades)} صفقة مفتوحة في Google Sheets")
     except Exception as e:
@@ -208,6 +214,13 @@ def _load_open_trades_from_sheets() -> list:
                 tp1_hit=str(d.get("tp1_hit","False"))=="True",
                 peak_price=float(d.get("peak_price", d["entry_price"])),
                 risk_amount=float(d.get("risk_amount",0)),
+                # ── استعادة حقول Trailing المتقدمة
+                trailing_active    = str(d.get("trailing_active","False"))=="True",
+                highest_price      = float(d.get("highest_price", 0) or 0) or float(d["entry_price"]),
+                lowest_price       = float(d.get("lowest_price",  0) or 0) or float(d["entry_price"]),
+                current_atr        = float(d.get("current_atr",  0) or 0),
+                trail_update_count = int(d.get("trail_update_count", 0) or 0),
+                tp1_pnl            = float(d.get("tp1_pnl", 0) or 0),
             )
             trades.append(trade)
             print(f"  📂 استعادة من Sheets: {d['ticker']} [{d['side'].upper()}]"
