@@ -869,24 +869,25 @@ def open_meanrev_trade(
     print(f"   ✅ أمر TP1: {order_id_1[:8] if order_id_1 else 'N/A'}...")
     print(f"   ✅ أمر TP2: {order_id_2[:8] if order_id_2 else 'فشل'}...")
 
-    # ── انتظر حتى 5 ثوان للتأكد من تنفيذ الأمر، ثم اقرأ الكمية الفعلية من Positions
-    # positions API أدق من filled_qty لأنه يعكس ما يحتفظ به الحساب فعلياً
+    # ── تحقق من الكمية الفعلية المُنفَّذة عبر الأمر نفسه (وليس positions)
+    # positions يجمع الكميات القديمة + الجديدة — الأمر أدق
     actual_total = total_qty  # افتراضي
     for attempt in range(3):
         time.sleep(2)
         try:
-            pos_r = requests.get(
-                f"{ALPACA_BASE_URL}/v2/positions/{signal.ticker}",
+            ord_r = requests.get(
+                f"{ALPACA_BASE_URL}/v2/orders/{order_id_1}",
                 headers=HEADERS, timeout=10,
             )
-            if pos_r.status_code == 200:
-                held_qty = abs(int(float(pos_r.json().get("qty", 0))))
-                if held_qty > 0:
-                    actual_total = held_qty
+            if ord_r.status_code == 200:
+                od = ord_r.json()
+                filled = int(float(od.get("filled_qty", 0) or 0))
+                if filled > 0:
+                    actual_total = filled
                     break
-            elif pos_r.status_code == 404:
-                # لم يُنفَّذ الأمر بعد — انتظر أكثر
-                pass
+                status_o = od.get("status", "")
+                if status_o in ("accepted", "pending_new", "new"):
+                    continue  # لم يُنفَّذ بعد
         except Exception:
             pass
 
