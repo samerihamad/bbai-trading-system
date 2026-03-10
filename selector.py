@@ -31,6 +31,11 @@ from strategy_momentum import (
     MomentumSignal,
 )
 
+# ── الحد الأدنى للـ Score المقبول — يُطبَّق في مرحلتين:
+# 1. عند بناء all_signals في run_selector
+# 2. عند apply_position_limits كطبقة حماية إضافية
+MIN_SCORE = 20
+
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
@@ -201,7 +206,6 @@ def apply_position_limits(
     # ── رفض الإشارات ضعيفة الجودة
     # الحد الأدنى 20 متوافق مع Dynamic Risk:
     # Score < 20 → مخاطرة 2% فقط، ومعظمها إشارات ضعيفة لا تستحق الدخول
-    MIN_SCORE = 20
     rejected_weak = [s for s in signals if score_signal(s) < MIN_SCORE]
     signals       = [s for s in signals if score_signal(s) >= MIN_SCORE]
     if rejected_weak:
@@ -350,16 +354,18 @@ def run_selector(
         elif len(candidates) == 1:
             # استراتيجية واحدة أعطت إشارة
             best = candidates[0]
-            all_signals.append(best)
             sc       = score_signal(best)
             tag      = "MOM" if "MOM" in best.reason else "REV"
             side_tag = "🟢 LONG" if best.side == "long" else "🔴 SHORT"
             print(f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}")
+            if sc >= MIN_SCORE:
+                all_signals.append(best)
+            else:
+                print(f"     ⛔ رُفض (Score={sc:.0f} < {MIN_SCORE})")
         else:
             # كلتا الاستراتيجيتين أعطتا إشارة — اختر الأعلى Score
             best      = max(candidates, key=lambda x: score_signal(x))
             rejected  = [c for c in candidates if c is not best][0]
-            all_signals.append(best)
             sc        = score_signal(best)
             sc_rej    = score_signal(rejected)
             tag       = "MOM" if "MOM" in best.reason else "REV"
@@ -369,6 +375,10 @@ def run_selector(
                 f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}"
                 f"  ← فاز على [{rej_tag}] Score={sc_rej:.0f}"
             )
+            if sc >= MIN_SCORE:
+                all_signals.append(best)
+            else:
+                print(f"     ⛔ رُفض (Score={sc:.0f} < {MIN_SCORE})")
 
         summary.append(SelectionResult(
             ticker=ticker,
