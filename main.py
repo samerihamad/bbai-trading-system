@@ -272,7 +272,22 @@ def monitor_open_trades():
             if status == "stopped":
                 exit_qty = result.get("exit_qty", trade.quantity)
                 log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty}")
-                place_market_sell(trade.ticker, exit_qty, side=side)
+                trade.closing_in_progress = True   # ← يمنع sync من تسجيل خسارة ثانية
+
+                # ── تحقق من qty_available قبل البيع
+                # إذا = 0 فـ Alpaca نفّذ الـ Bracket Stop تلقائياً — لا نبيع مرة ثانية
+                from executor import get_position_qty_available
+                available = get_position_qty_available(trade.ticker)
+
+                if available == 0:
+                    log(f"  ℹ️  {trade.ticker}: Alpaca نفّذ الـ Stop تلقائياً — تسجيل فقط بدون بيع")
+                elif available < exit_qty:
+                    log(f"  ⚠️  {trade.ticker}: متاح={available} < مطلوب={exit_qty} → بيع ما هو متاح")
+                    place_market_sell(trade.ticker, available, side=side)
+                    exit_qty = available
+                else:
+                    place_market_sell(trade.ticker, exit_qty, side=side)
+
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
@@ -284,23 +299,37 @@ def monitor_open_trades():
                     target=trade.target, risk_amount=trade.risk_amount,
                     exit_reason="stopped", opened_at=trade.opened_at, side=side,
                 )
-                stopped = risk_manager.record_loss(pnl, r)
-                try:
-                    notify_trade_loss(
-                        ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=exit_qty,
-                        loss=abs(pnl), daily_losses=risk_manager.daily_losses,
-                    )
-                    if stopped:
-                        notify_system_stopped()
-                except Exception as e:
-                    log(f"Telegram error: {e}")
+                # ── تحديد WIN/LOSS/BREAKEVEN
+                if trade.tp1_hit and pnl >= 0:
+                    # وقف تحرّك للتعادل بعد TP1 → ربح أو تعادل
+                    risk_manager.record_win(pnl, r)
+                    try:
+                        notify_trade_win(
+                            ticker=trade.ticker, entry_price=trade.entry_price,
+                            exit_price=price, quantity=exit_qty,
+                            profit=pnl, r_achieved=r,
+                        )
+                    except Exception as e:
+                        log(f"Telegram error: {e}")
+                else:
+                    stopped = risk_manager.record_loss(pnl, r)
+                    try:
+                        notify_trade_loss(
+                            ticker=trade.ticker, entry_price=trade.entry_price,
+                            exit_price=price, quantity=exit_qty,
+                            loss=abs(pnl), daily_losses=risk_manager.daily_losses,
+                        )
+                        if stopped:
+                            notify_system_stopped()
+                    except Exception as e:
+                        log(f"Telegram error: {e}")
                 trades_to_remove.append(trade)
 
             elif status == "tp1_hit":
                 tp1_qty  = result.get("exit_qty", trade.quantity // 2)
                 new_stop = result["new_stop"]
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
+                trade.closing_in_progress = True
                 place_market_sell(trade.ticker, tp1_qty, side=side)
                 pnl_tp1 = round(
                     (price - trade.entry_price) * tp1_qty if side == "long"
@@ -326,7 +355,8 @@ def monitor_open_trades():
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
-                trade.tp1_hit   = True
+                trade.tp1_hit              = True
+                trade.closing_in_progress  = False   # ← الصفقة لا تزال مفتوحة
                 trade.stop_loss = new_stop
                 # ── تحديث الوقف الفعلي في Alpaca (نقل للتعادل)
                 try:
@@ -338,6 +368,7 @@ def monitor_open_trades():
                 exit_qty = result.get("exit_qty", trade.quantity_remaining if trade.tp1_hit else trade.quantity)
                 label    = "TP2" if trade.tp1_hit else "TARGET"
                 log(f"{label}: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f}")
+                trade.closing_in_progress = True
                 place_market_sell(trade.ticker, exit_qty, side=side)
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
