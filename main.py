@@ -147,6 +147,7 @@ def get_system_context() -> dict:
     تُرجع الحالة الحالية للنظام.
     يستخدمها telegram_commands.py لأمر /status.
     """
+    global _pre_market_done, _pre_alert_done, _close_done
     return {
         "open_trades":     open_trades,
         "risk_manager":    risk_manager,
@@ -536,6 +537,7 @@ def run_market_close():
 
 def main():
     global _consecutive_errors, _error_notified
+    global _pre_market_done, _pre_alert_done, _close_done
 
     log("=" * 55)
     log("BBAI Trading System -- Starting")
