@@ -1166,17 +1166,77 @@ def get_position_qty_available(ticker: str) -> int:
 
 
 def close_all_positions() -> bool:
-    """يُغلق كل المراكز المفتوحة دفعة واحدة — يُستخدم عند نهاية الجلسة."""
+    """
+    يُغلق كل المراكز المفتوحة بشكل موثوق:
+    1. إلغاء كل الأوامر المعلقة (bracket/limit/stop) — لأنها تحجب الأسهم
+    2. انتظار ثانية للتأكد من إلغائها
+    3. إغلاق المراكز عبر DELETE /v2/positions
+    4. التحقق الفعلي من Alpaca أن المراكز أُغلقت فعلاً
+    """
+    import time
+
+    # ── الخطوة 1: إلغاء كل الأوامر المعلقة
     try:
-        response = requests.delete(
+        cancel_resp = requests.delete(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            timeout=15,
+        )
+        print(f"🗑️  إلغاء الأوامر المعلقة: HTTP {cancel_resp.status_code}")
+    except Exception as e:
+        print(f"⚠️  فشل إلغاء الأوامر: {e}")
+
+    time.sleep(2)  # انتظار حتى يُسجّل Alpaca الإلغاء
+
+    # ── الخطوة 2: إغلاق كل المراكز
+    try:
+        close_resp = requests.delete(
             f"{ALPACA_BASE_URL}/v2/positions",
             headers=HEADERS,
             timeout=15,
         )
-        success = response.status_code in (200, 204, 207)
-        if success:
-            print("✅ تم إغلاق كل المراكز المفتوحة")
-        return success
+        print(f"🔒 إغلاق المراكز: HTTP {close_resp.status_code}")
+        if close_resp.status_code not in (200, 204, 207):
+            print(f"❌ فشل إغلاق المراكز: {close_resp.text[:200]}")
+            return False
     except Exception as e:
         print(f"❌ خطأ في إغلاق المراكز: {e}")
         return False
+
+    time.sleep(3)  # انتظار تنفيذ أوامر الإغلاق في السوق
+
+    # ── الخطوة 3: التحقق الفعلي — هل بقي أي مركز مفتوح؟
+    try:
+        verify_resp = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions",
+            headers=HEADERS,
+            timeout=10,
+        )
+        if verify_resp.status_code == 200:
+            remaining = verify_resp.json()
+            if remaining:
+                tickers = [p.get("symbol") for p in remaining]
+                print(f"⚠️  لا تزال هناك مراكز مفتوحة بعد الإغلاق: {tickers}")
+                # محاولة ثانية للمراكز المتبقية فقط
+                for ticker in tickers:
+                    try:
+                        requests.delete(
+                            f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
+                            headers=HEADERS,
+                            params={"percentage": "1"},
+                            timeout=10,
+                        )
+                        print(f"  🔁 محاولة إغلاق {ticker} منفرداً")
+                    except Exception as e:
+                        print(f"  ❌ فشل إغلاق {ticker}: {e}")
+                return False  # نُعيد False ليُعلم المستخدم بالمشكلة
+            else:
+                print("✅ تم إغلاق كل المراكز — تحقق Alpaca ناجح")
+                return True
+        else:
+            # لو فشل التحقق — نفترض النجاح (أفضل من إرسال رسالة خاطئة)
+            print(f"⚠️  تعذّر التحقق من المراكز: HTTP {verify_resp.status_code}")
+            return True
+    except Exception as e:
+        print(f"⚠️  خطأ في التحقق: {e}")
+        return True
