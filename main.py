@@ -75,6 +75,13 @@ _pre_alert_done   : bool = False
 _close_done      : bool = False
 _current_day     : str  = ""
 
+# ── flags كـ dict واحد — يُعدَّل بدون `global` في كل مكان
+_flags = {
+    "pre_market_done": False,
+    "pre_alert_done":  False,
+    "close_done":      False,
+}
+
 # تتبع الأخطاء المتكررة لإرسال إشعار مرة واحدة فقط
 _consecutive_errors : int  = 0
 _error_notified     : bool = False
@@ -132,13 +139,13 @@ def is_close_time() -> bool:
 
 
 def check_new_day():
-    global _pre_market_done, _close_done, _current_day, _pre_alert_done
+    global _current_day
     today = get_ny_time().strftime("%Y-%m-%d")
     if today != _current_day:
         _current_day     = today
-        _pre_market_done = False
-        _pre_alert_done  = False
-        _close_done      = False
+        _flags["pre_market_done"] = False
+        _flags["pre_alert_done"] = False
+        _flags["close_done"] = False
         log(f"New trading day: {today} -- flags reset")
 
 
@@ -147,13 +154,13 @@ def get_system_context() -> dict:
     تُرجع الحالة الحالية للنظام.
     يستخدمها telegram_commands.py لأمر /status.
     """
-    global _pre_market_done, _pre_alert_done, _close_done
+    
     return {
         "open_trades":     open_trades,
         "risk_manager":    risk_manager,
         "daily_stocks":    daily_stocks,
-        "pre_market_done": _pre_market_done,
-        "close_done":      _close_done,
+        "pre_market_done": _flags["pre_market_done"],
+        "close_done": _flags["close_done"],
     }
 
 
@@ -163,10 +170,10 @@ def get_system_context() -> dict:
 
 def run_pre_market_alert():
     """09:00 — رسالة تنبيه فقط بدون اختيار أسهم."""
-    global _pre_alert_done
-    if _pre_alert_done:
+    
+    if _flags["pre_alert_done"]:
         return
-    _pre_alert_done = True
+    _flags["pre_alert_done"] = True
     try:
         from notifier import _send
         _send(
@@ -181,7 +188,7 @@ def run_pre_market_alert():
 
 
 def run_pre_market():
-    global daily_stocks, _pre_market_done
+    global daily_stocks
 
     log("=== PRE-MARKET ROUTINE START ===")
     risk_manager.reset()
@@ -225,7 +232,7 @@ def run_pre_market():
         except Exception:
             pass
 
-    _pre_market_done = True
+    _flags["pre_market_done"] = True
     log("=== PRE-MARKET ROUTINE END ===")
 
 
@@ -489,13 +496,13 @@ def scan_for_signals():
 # -----------------------------------------
 
 def run_market_close():
-    global open_trades, _close_done
+    global open_trades
 
-    if _close_done:
+    if _flags["close_done"]:
         return
 
     log("=== MARKET CLOSE ROUTINE START ===")
-    _close_done = True
+    _flags["close_done"] = True
 
     try:
         # ── الصفقات المفتوحة تنتقل لليوم التالي — لا نغلقها
@@ -537,7 +544,7 @@ def run_market_close():
 
 def main():
     global _consecutive_errors, _error_notified
-    global _pre_market_done, _pre_alert_done, _close_done
+    
 
     log("=" * 55)
     log("BBAI Trading System -- Starting")
@@ -588,16 +595,16 @@ def main():
             check_new_day()
             t = get_ny_time().strftime("%H:%M")
 
-            if is_pre_market_alert_time() and not _pre_alert_done:
+            if is_pre_market_alert_time() and not _flags["pre_alert_done"]:
                 run_pre_market_alert()
 
-            elif is_pre_market_time() and not _pre_market_done:
+            elif is_pre_market_time() and not _flags["pre_market_done"]:
                 run_pre_market()
 
             elif is_market_hours():
                 if not risk_manager.can_trade():
                     log("System paused -- daily loss limit reached")
-                elif not daily_stocks and not _pre_market_done:
+                elif not daily_stocks and not _flags["pre_market_done"]:
                     if system_state.maintenance_mode:
                         log("MAINTENANCE MODE -- waiting for /resume before pre-market")
                     else:
@@ -607,14 +614,14 @@ def main():
                     monitor_open_trades()
                     refresh_universe_if_needed()
                     scan_for_signals()
-                elif _pre_market_done and not daily_stocks:
+                elif _flags["pre_market_done"] and not daily_stocks:
                     # فشل تحميل الأسهم سابقاً — نعيد المحاولة كل 5 دقائق
                     log("⚠️ Universe فارغ — إعادة المحاولة...")
-                    _pre_market_done = False  # يسمح بإعادة run_pre_market
+                    _flags["pre_market_done"] = False  # يسمح بإعادة run_pre_market
                 else:
                     log("No universe -- waiting for pre-market routine")
 
-            elif is_close_time() and not _close_done:
+            elif is_close_time() and not _flags["close_done"]:
                 run_market_close()
 
             else:
