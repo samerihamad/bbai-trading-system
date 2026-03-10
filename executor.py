@@ -285,22 +285,114 @@ def get_open_positions() -> list:
 
 
 def sync_with_alpaca(open_trades: list) -> list:
-    """يكتشف الصفقات المغلقة يدوياً في Alpaca ويحذفها من القائمة."""
+    """
+    يكتشف الصفقات المغلقة في Alpaca (تلقائياً عبر Bracket أو يدوياً)
+    ويرسل إشعار Telegram مع PnL ويسجّلها في Sheets.
+    """
     if not open_trades:
         return open_trades
     try:
         r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
         if r.status_code != 200:
             return open_trades
-        alpaca_symbols = {pos.get("symbol","") for pos in r.json()}
+        alpaca_symbols = {pos.get("symbol", "") for pos in r.json()}
         removed = []
+
         for trade in open_trades[:]:
             if trade.ticker not in alpaca_symbols:
                 open_trades.remove(trade)
                 removed.append(trade.ticker)
-                print(f"  ⚠️  {trade.ticker} أُغلقت يدوياً — تم حذفها من المراقبة")
+
+                # ── محاولة جلب آخر سعر تنفيذ من Alpaca Orders
+                exit_price  = trade.entry_price   # fallback
+                exit_reason = "closed_alpaca"
+                try:
+                    ord_r = requests.get(
+                        f"{ALPACA_BASE_URL}/v2/orders",
+                        headers=HEADERS,
+                        params={"symbols": trade.ticker, "status": "closed", "limit": 5, "direction": "desc"},
+                        timeout=10,
+                    )
+                    if ord_r.status_code == 200:
+                        orders = ord_r.json()
+                        # أحدث أمر مكتمل هو أمر الإغلاق
+                        for o in orders:
+                            if o.get("status") == "filled" and o.get("filled_avg_price"):
+                                exit_price  = float(o["filled_avg_price"])
+                                # حدد سبب الإغلاق من نوع الأمر الأب
+                                otype = o.get("order_class", "")
+                                if "bracket" in otype or o.get("type") in ("stop", "stop_limit"):
+                                    exit_reason = "stop_loss_alpaca"
+                                elif o.get("type") == "limit":
+                                    exit_reason = "tp_alpaca"
+                                break
+                except Exception:
+                    pass
+
+                # ── حساب PnL
+                qty = getattr(trade, "quantity_remaining", trade.quantity)
+                if trade.side == "long":
+                    pnl = round((exit_price - trade.entry_price) * qty, 2)
+                else:
+                    pnl = round((trade.entry_price - exit_price) * qty, 2)
+
+                risk = abs(trade.entry_price - trade.stop_loss)
+                r_val = round(pnl / (risk * qty), 2) if risk > 0 and qty > 0 else 0.0
+
+                print(f"  🔔 {trade.ticker} أُغلقت تلقائياً | exit=${exit_price:.2f} | PnL=${pnl:+.2f} | {r_val:+.2f}R")
+
+                # ── تسجيل في Sheets
+                try:
+                    from reporter import record_trade
+                    record_trade(
+                        ticker=trade.ticker,
+                        strategy=getattr(trade, "strategy", "meanrev"),
+                        entry_price=trade.entry_price,
+                        exit_price=exit_price,
+                        quantity=qty,
+                        stop_loss=trade.stop_loss,
+                        target=trade.target_tp2,
+                        risk_amount=getattr(trade, "risk_amount", 0),
+                        exit_reason=exit_reason,
+                        opened_at=getattr(trade, "opened_at", None) or __import__("datetime").datetime.now(),
+                        side=trade.side,
+                    )
+                except Exception as e:
+                    print(f"  ⚠️  فشل تسجيل {trade.ticker} في Sheets: {e}")
+
+                # ── إشعار Telegram
+                try:
+                    from notifier import notify_trade_win, notify_trade_loss
+                    duration = ""
+                    if hasattr(trade, "opened_at") and trade.opened_at:
+                        import datetime as _dt
+                        import pytz as _pytz
+                        TZ_ = _pytz.timezone("America/New_York")
+                        now_ = _dt.datetime.now(_pytz.utc).astimezone(TZ_)
+                        oa   = trade.opened_at if hasattr(trade.opened_at, "tzinfo") else TZ_.localize(trade.opened_at)
+                        mins = int((now_ - oa).total_seconds() / 60)
+                        duration = f"{mins}d" if mins >= 1440 else f"{mins}m"
+
+                    if pnl >= 0:
+                        notify_trade_win(
+                            ticker=trade.ticker, side=trade.side,
+                            entry=trade.entry_price, exit_p=exit_price,
+                            qty=qty, pnl=pnl, r=r_val,
+                            reason=exit_reason, duration=duration,
+                        )
+                    else:
+                        notify_trade_loss(
+                            ticker=trade.ticker, side=trade.side,
+                            entry=trade.entry_price, exit_p=exit_price,
+                            qty=qty, pnl=pnl, r=r_val,
+                            reason=exit_reason, duration=duration,
+                        )
+                except Exception as e:
+                    print(f"  ⚠️  فشل إشعار Telegram لـ {trade.ticker}: {e}")
+
         if removed:
-            print(f"🔄 Sync: حُذف {len(removed)} صفقة: {removed}")
+            print(f"🔄 Sync: أُغلق {len(removed)} صفقة بواسطة Alpaca: {removed}")
+
     except Exception as e:
         print(f"⚠️  فشل Sync مع Alpaca: {e}")
     return open_trades
@@ -641,8 +733,28 @@ def open_meanrev_trade(
         side=signal.side,
     )
     if not order_id_2:
-        # لو فشل الأمر الثاني — نكمل لكن نسجل تحذير
-        print(f"⚠️  فشل أمر TP2 لـ {signal.ticker} — النصف الثاني بدون حماية Alpaca")
+        # ── فشل TP2 → إلغاء TP1 وإغلاق البوزيشن كاملاً
+        print(f"❌ فشل أمر TP2 لـ {signal.ticker} — إلغاء الصفقة بالكامل")
+        # إلغاء أمر TP1
+        if order_id_1:
+            try:
+                requests.delete(
+                    f"{ALPACA_BASE_URL}/v2/orders/{order_id_1}",
+                    headers=HEADERS, timeout=10,
+                )
+                print(f"  🗑️  تم إلغاء أمر TP1: {order_id_1[:8]}...")
+            except Exception as e:
+                print(f"  ⚠️  فشل إلغاء TP1: {e}")
+        # إغلاق البوزيشن
+        try:
+            requests.delete(
+                f"{ALPACA_BASE_URL}/v2/positions/{signal.ticker}",
+                headers=HEADERS, timeout=10,
+            )
+            print(f"  🗑️  تم إغلاق بوزيشن {signal.ticker}")
+        except Exception as e:
+            print(f"  ⚠️  فشل إغلاق البوزيشن: {e}")
+        return None
 
     print(f"   ✅ أمر TP1: {order_id_1[:8] if order_id_1 else 'N/A'}...")
     print(f"   ✅ أمر TP2: {order_id_2[:8] if order_id_2 else 'فشل'}...")
