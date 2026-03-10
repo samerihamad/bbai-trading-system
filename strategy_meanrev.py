@@ -70,8 +70,6 @@ class MeanRevSignal:
     adx:             float = 0.0
     signal_quality:  str   = "standard"
     liquidity_sweep: bool  = False
-    score:           float = 0.0       # يُحسب في selector.py ويُستخدم للـ Dynamic Risk
-    timeframe:       str   = "1Day"    # التايم فريم الذي جاءت منه الإشارة
 
 # ─────────────────────────────────────────
 # 1. جلب البيانات وحساب المؤشرات
@@ -137,6 +135,23 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     tr = pd.concat([df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs()], axis=1).max(axis=1)
     atr = tr.rolling(period).mean().iloc[-1]
     return round(float(atr) if not pd.isna(atr) else 0.0, 4)
+
+
+def get_current_atr(ticker: str, timeframe: str = "15Min") -> float:
+    """
+    يجلب ATR الحالي (ديناميكي) أثناء التشغيل لاستخدامه في الـ Trailing Stop.
+    يُستخدم بدلاً من ATR المحفوظ عند الفتح لأن التقلب يتغير خلال اليوم.
+    يرجع 0.0 عند الفشل (safe fallback).
+    """
+    try:
+        df = fetch_bars(ticker, timeframe=timeframe, days=5)
+        if df is None or df.empty or len(df) < 15:
+            return 0.0
+        atr = calc_atr(df)
+        return atr if atr > 0 else 0.0
+    except Exception as e:
+        print(f"  ⚠️  فشل جلب ATR الديناميكي لـ {ticker}: {e}")
+        return 0.0
 
 def calc_vwap(df: pd.DataFrame) -> float:
     typical = (df["high"] + df["low"] + df["close"]) / 3
@@ -306,8 +321,7 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float,
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200,
-                             timeframe=timeframe)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
 
     # ── فلتر 1: ATR
     if not (S2_ATR_MIN_PCT <= atr_pct <= S2_ATR_MAX_PCT):
@@ -353,8 +367,7 @@ def _analyze_long(ticker: str, df: pd.DataFrame, ema_above: bool, ema200: float,
     return MeanRevSignal(ticker=ticker, side="long", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_long,
-                         timeframe=timeframe)
+                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_long)
 
 # ─────────────────────────────────────────
 # 4. التحليل الرئيسي المحسن - SHORT
@@ -378,8 +391,7 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float, 
 
     def no_signal(reason: str):
         return MeanRevSignal(ticker=ticker, side="short", has_signal=False, reason=reason,
-                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200,
-                             timeframe=timeframe)
+                             rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap, adx=adx, ema200=ema200)
 
     if not SHORT_ENABLED:
         return no_signal("SHORT غير مفعّل")
@@ -418,8 +430,7 @@ def _analyze_short(ticker: str, df: pd.DataFrame, exchange: str, ema200: float, 
     return MeanRevSignal(ticker=ticker, side="short", has_signal=True, reason=reason,
                          entry_price=price, stop_loss=stop, target_tp1=tp1, target_tp2=tp2,
                          trail_step=trail, rsi=rsi, atr=atr, atr_pct=atr_pct, vwap=vwap,
-                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short,
-                         timeframe=timeframe)
+                         adx=adx, ema200=ema200, signal_quality=quality, liquidity_sweep=sweep_short)
 
 # ─────────────────────────────────────────
 # 5. الدالة الرئيسية — Multi-Timeframe
@@ -439,7 +450,7 @@ def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema20
         if is_trap:
             return MeanRevSignal(
                 ticker=ticker, side="long", has_signal=False,
-                reason=trap_reason, timeframe="1Day",
+                reason=trap_reason,
             )
 
     timeframes = [
@@ -463,4 +474,4 @@ def analyze(ticker: str, ema_above: bool = True, exchange: str = "NASDAQ", ema20
         if short_signal.has_signal:
             return short_signal
 
-    return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason="لا إشارة على 1D/1H/15M", timeframe="1Day")
+    return MeanRevSignal(ticker=ticker, side="long", has_signal=False, reason="لا إشارة على 1D/1H/15M")
