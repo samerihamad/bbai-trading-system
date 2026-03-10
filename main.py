@@ -502,6 +502,11 @@ def scan_for_signals():
                         stop_loss=signal.stop_loss,
                         target=signal.target_tp2,
                         risk_amount=trade.risk_amount,
+                        target_tp1=signal.target_tp1,
+                        target_tp2=signal.target_tp2,
+                        qty_tp1=trade.quantity - trade.quantity_remaining,
+                        qty_tp2=trade.quantity_remaining,
+                        trade_number=_daily_trade_num,
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
