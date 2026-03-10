@@ -486,6 +486,7 @@ class OpenTrade:
     risk_amount:         float
     opened_at:           datetime  = None
     closing_in_progress: bool      = False  # علامة: النظام يعالج الإغلاق — sync يتجاهلها
+    tp1_pnl:             float     = 0.0    # ربح TP1 المحقق — يُستخدم لحساب total_pnl عند الإغلاق النهائي
 
     def __post_init__(self):
         if self.opened_at is None:
