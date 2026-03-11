@@ -375,6 +375,20 @@ def notify_trade_loss(
     return _send(msg)
 
 
+def notify_system_started(balance: float, open_trades: int) -> bool:
+    """تُرسَل فور اكتمال الـ Deploy وبدء النظام."""
+    trades_line = f"📊 مراكز مفتوحة: {open_trades}" if open_trades > 0 else "📊 لا توجد مراكز مفتوحة"
+    msg = (
+        f"✅ <b>النظام انطلق بنجاح</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"💰 الرصيد: <b>${balance:,.2f}</b>\n"
+        f"{trades_line}\n"
+        "⚙️ الـ Deploy اكتمل — النظام يعمل بشكل سليم ✅"
+    )
+    return _send(msg)
+
+
 def notify_system_stopped() -> bool:
     msg = (
         "⛔ <b>SYSTEM STOPPED | النظام متوقف</b>\n"
