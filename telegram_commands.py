@@ -23,6 +23,58 @@ TZ = pytz.timezone(TIMEZONE)
 DISK_PATH         = os.getenv("RENDER_DISK_PATH", "logs")
 MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 
+# Render API — لإيقاف/تشغيل الـ service فعلياً
+RENDER_API_KEY    = os.getenv("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
+
+
+def _render_suspend() -> bool:
+    """
+    يُوقف الـ Render service فعلياً عبر Render API.
+    يحتاج متغيرين في Render Environment Variables:
+      RENDER_API_KEY    → من render.com → Account → API Keys
+      RENDER_SERVICE_ID → من URL الـ service (srv-xxxxxxx)
+    """
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        print("⚠️  RENDER_API_KEY أو RENDER_SERVICE_ID غير موجود — السيرفر لن يتوقف تلقائياً", flush=True)
+        return False
+    try:
+        import requests as _req
+        resp = _req.post(
+            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/suspend",
+            headers={"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201, 202):
+            print("✅ Render service suspended via API", flush=True)
+            return True
+        print(f"⚠️  Render suspend failed: HTTP {resp.status_code}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️  Render API error: {e}", flush=True)
+        return False
+
+
+def _render_resume() -> bool:
+    """يُعيد تشغيل الـ Render service عبر Render API عند /resume."""
+    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
+        return False
+    try:
+        import requests as _req
+        resp = _req.post(
+            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/resume",
+            headers={"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201, 202):
+            print("✅ Render service resumed via API", flush=True)
+            return True
+        print(f"⚠️  Render resume failed: HTTP {resp.status_code}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️  Render API error: {e}", flush=True)
+        return False
+
 
 # -----------------------------------------
 # حالة النظام
@@ -30,10 +82,14 @@ MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 
 class SystemState:
     def __init__(self):
-        # قراءة الـ flag عند البداية
-        # لو كان موجوداً من جلسة سابقة نتجاهله ونبدأ نظيف
-        self.maintenance_mode : bool = False
-        self._last_update_id  : int  = 0
+        self._last_update_id : int = 0
+        # ── قراءة الـ flag من الـ disk عند كل startup
+        # هذا يضمن أن Deploy جديد يحترم قرار الصيانة السابق
+        if os.path.exists(MAINTENANCE_FLAG):
+            self.maintenance_mode = True
+            print("🔧 MAINTENANCE FLAG found on disk — system stays in maintenance mode", flush=True)
+        else:
+            self.maintenance_mode = False
 
     def enter_maintenance(self):
         """يُفعّل وضع الصيانة ويكتب الـ flag على الـ disk."""
@@ -125,18 +181,35 @@ def _handle_command(command: str, context: dict):
         open_trades = context.get("open_trades", [])
         system_state.enter_maintenance()
 
+        # ── محاولة إيقاف السيرفر عبر Render API
+        render_stopped = _render_suspend()
+
+        if render_stopped:
+            server_msg = (
+                "🔴 <b>السيرفر متوقف تلقائياً</b>\n"
+                "✅ ارفع ملفاتك على GitHub\n"
+                "✅ ثم اضغط <b>Resume</b> في Render Dashboard\n"
+                "   أو أرسل /resume من Telegram\n"
+            )
+        else:
+            server_msg = (
+                "⚠️ <b>السيرفر لم يتوقف تلقائياً</b>\n"
+                "   (أضف RENDER_API_KEY + RENDER_SERVICE_ID للإيقاف التلقائي)\n"
+                "✅ ارفع ملفاتك على GitHub\n"
+                "✅ ثم اضغط Manual Deploy في Render\n"
+                "⚠️ <b>النظام سينتظر /resume قبل التداول</b>\n"
+            )
+
         _send(
             "🔧 <b>MAINTENANCE MODE | وضع الصيانة</b>\n"
             f"🕐 {now_str}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "⛔ <b>النظام متوقف كلياً</b>\n"
+            "⛔ <b>التداول متوقف كلياً</b>\n"
             f"📊 الصفقات المفتوحة: {len(open_trades)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "✅ يمكنك الآن تعديل الملفات ورفعها على GitHub\n"
-            "✅ ثم اضغط Manual Deploy في Render\n"
+            f"{server_msg}"
             "━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ النظام سينتظر أمر /resume قبل التداول\n"
-            "ارسل /resume عند الانتهاء من الصيانة."
+            "أرسل /resume عند الانتهاء من الصيانة."
         )
         print(f"[{now_str}]  MAINTENANCE MODE ON -- System paused", flush=True)
 
@@ -151,6 +224,9 @@ def _handle_command(command: str, context: dict):
             return
 
         system_state.exit_maintenance()
+
+        # ── استئناف السيرفر إذا كان موقوفاً عبر Render API
+        _render_resume()
 
         _send(
             "✅ <b>System Resumed | تم استئناف النظام</b>\n"
@@ -245,29 +321,30 @@ def _handle_command(command: str, context: dict):
                         pnl = round(pnl, 2)
                         risk = getattr(trade, "risk_amount", 0)
                         r_multiple = round(pnl / risk, 2) if risk > 0 else 0.0
-                        qty = trade.quantity
 
                         if pnl >= 0:
                             if risk_manager:
-                                risk_manager.record_win(pnl, r_multiple)
+                                risk_manager.daily_wins += 1
                             notify_trade_win(
                                 ticker=trade.ticker,
-                                entry_price=trade.entry_price,
+                                side=trade.side,
+                                entry=trade.entry_price,
                                 exit_price=current_price,
-                                quantity=qty,
-                                profit=pnl,
-                                r_achieved=r_multiple,
+                                pnl=pnl,
+                                r_multiple=r_multiple,
+                                exit_reason="Manual /closeall",
                             )
                         else:
                             if risk_manager:
-                                risk_manager.record_loss(pnl, r_multiple)
+                                risk_manager.record_loss()
                             notify_trade_loss(
                                 ticker=trade.ticker,
-                                entry_price=trade.entry_price,
+                                side=trade.side,
+                                entry=trade.entry_price,
                                 exit_price=current_price,
-                                quantity=qty,
-                                loss=abs(pnl),
-                                daily_losses=risk_manager.daily_losses if risk_manager else 0,
+                                pnl=pnl,
+                                r_multiple=r_multiple,
+                                exit_reason="Manual /closeall",
                             )
                     except Exception as e:
                         _send(f"⚠️ خطأ في حساب P&L لـ {trade.ticker}: {e}")
@@ -275,13 +352,14 @@ def _handle_command(command: str, context: dict):
                 # ── إغلاق كل المراكز في Alpaca
                 success = close_all_positions()
 
+                # ── مسح الذاكرة و Sheets
+                open_trades.clear()
+                try:
+                    _delete_open_trades_sheets()
+                except Exception:
+                    pass
+
                 if success:
-                    # ── مسح الذاكرة و Sheets فقط عند النجاح الفعلي
-                    open_trades.clear()
-                    try:
-                        _delete_open_trades_sheets()
-                    except Exception:
-                        pass
                     _send(
                         "✅ <b>تم إغلاق كل المراكز</b>\n"
                         "━━━━━━━━━━━━━━━━━━\n"
@@ -289,12 +367,7 @@ def _handle_command(command: str, context: dict):
                         "🇦🇪 تم إغلاق جميع الصفقات بنجاح."
                     )
                 else:
-                    _send(
-                        "⚠️ <b>فشل إغلاق بعض المراكز</b>\n"
-                        "━━━━━━━━━━━━━━━━━━\n"
-                        "🔴 لا تزال هناك مراكز مفتوحة في Alpaca.\n"
-                        "➡️ تحقق من Alpaca وأغلقها يدوياً إذا لزم الأمر."
-                    )
+                    _send("⚠️ فشل إغلاق بعض المراكز — تحقق من Alpaca يدوياً.")
             except Exception as e:
                 _send(f"❌ خطأ في إغلاق المراكز: {e}")
 
