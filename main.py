@@ -35,6 +35,8 @@ from executor         import (
     update_stop_loss_alpaca,
     _save_open_trades,
     _delete_open_trades_sheets,
+    save_flags_to_sheets,
+    load_flags_from_sheets,
     OpenTrade,
 )
 from strategy_meanrev import refresh_allowed_tickers
@@ -77,59 +79,20 @@ _pre_market_done  : bool = False
 _pre_alert_done   : bool = False
 _close_done      : bool = False
 
-# ── مسار حفظ الـ flags على الـ Disk (يبقى بعد restart)
-_DISK_PATH   = os.getenv("RENDER_DISK_PATH", "logs")
-_FLAGS_FILE  = os.path.join(_DISK_PATH, ".daily_flags")
-
-
-def _load_flags_from_disk() -> dict:
-    """يقرأ الـ flags المحفوظة على الـ Disk — يُستدعى عند Startup."""
-    try:
-        if not os.path.exists(_FLAGS_FILE):
-            return {}
-        import json
-        from datetime import datetime as _dt
-        import pytz as _pytz
-        today = _dt.now(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
-        with open(_FLAGS_FILE) as f:
-            data = json.load(f)
-        # تحقق أن البيانات لليوم الحالي فقط
-        if data.get("date") != today:
-            return {}  # يوم مختلف → تجاهل
-        return data
-    except Exception as e:
-        print(f"⚠️  _load_flags_from_disk error: {e}", flush=True)
-        return {}
-
-
 def _save_flags_to_disk():
-    """يحفظ الـ flags الحالية على الـ Disk."""
+    """يحفظ الـ flags في Google Sheets — يبقى بعد كل Deploy."""
     try:
-        import json
-        from datetime import datetime as _dt
-        import pytz as _pytz
-        today = _dt.now(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
-        os.makedirs(_DISK_PATH, exist_ok=True)
-        data = {
-            "date":             today,
-            "pre_alert_done":   _flags["pre_alert_done"],
-            "pre_market_done":  _flags["pre_market_done"],
-            "close_done":       _flags["close_done"],
-            "daily_trade_num":  _flags["daily_trade_num"],
-        }
-        with open(_FLAGS_FILE, "w") as f:
-            json.dump(data, f)
+        save_flags_to_sheets(_flags)
     except Exception as e:
         print(f"⚠️  فشل حفظ الـ flags: {e}", flush=True)
 
+# ── تحميل الـ flags من Sheets عند Startup
+_disk_flags = load_flags_from_sheets()
 
-# ── تحميل الـ flags من الـ Disk أولاً (قبل أي تهيئة)
-_disk_flags = _load_flags_from_disk()
-
-# ── تهيئة _current_day من الـ disk لمنع reset وهمي عند restart في نفس اليوم
+# ── تهيئة _current_day من الـ Sheets لمنع reset وهمي عند restart في نفس اليوم
 _current_day: str = _disk_flags.get("date", "")
 
-# ── flags كـ dict واحد — يُعدَّل بدون `global` في كل مكان
+# ── flags كـ dict واحد
 _flags = {
     "pre_market_done": _disk_flags.get("pre_market_done", False),
     "pre_alert_done":  _disk_flags.get("pre_alert_done",  False),
@@ -137,7 +100,7 @@ _flags = {
     "daily_trade_num": _disk_flags.get("daily_trade_num", 0),
 }
 if any([_flags["pre_alert_done"], _flags["pre_market_done"], _flags["close_done"]]):
-    print(f"📂 Flags restored from disk: pre_alert={_flags['pre_alert_done']} | "
+    print(f"📂 Flags restored: pre_alert={_flags['pre_alert_done']} | "
           f"pre_market={_flags['pre_market_done']} | close={_flags['close_done']} | "
           f"trades={_flags['daily_trade_num']}", flush=True)
 
@@ -206,10 +169,9 @@ def check_new_day():
         _flags["pre_alert_done"]   = False
         _flags["close_done"]       = False
         _flags["daily_trade_num"]  = 0
-        # حذف الـ flags القديمة من الـ Disk
+        # مسح الـ flags القديمة من Sheets
         try:
-            if os.path.exists(_FLAGS_FILE):
-                os.remove(_FLAGS_FILE)
+            save_flags_to_sheets(_flags)
         except Exception:
             pass
         log(f"New trading day: {today} -- flags reset")
