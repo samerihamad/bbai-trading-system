@@ -260,7 +260,7 @@ def _handle_command(command: str, context: dict):
             system_state._pending_closeall = False
             try:
                 from executor import close_all_positions, get_current_price, _delete_open_trades_sheets
-                from notifier import notify_trade_win, notify_trade_loss
+                from notifier import notify_trade_closed
 
                 context_data = context() if callable(context) else context
                 open_trades  = context_data.get("open_trades", [])
@@ -273,39 +273,37 @@ def _handle_command(command: str, context: dict):
                         if current_price <= 0:
                             current_price = trade.entry_price
 
+                        qty = getattr(trade, "quantity_remaining", trade.quantity)
                         if trade.side == "long":
-                            pnl = (current_price - trade.entry_price) * trade.quantity
+                            pnl = (current_price - trade.entry_price) * qty
                         else:
-                            pnl = (trade.entry_price - current_price) * trade.quantity
+                            pnl = (trade.entry_price - current_price) * qty
 
                         pnl = round(pnl, 2)
-                        risk = getattr(trade, "risk_amount", 0)
-                        r_multiple = round(pnl / risk, 2) if risk > 0 else 0.0
+                        # أضف TP1 إذا كانت تحققت
+                        tp1_pnl = getattr(trade, "tp1_pnl", 0.0)
+                        total_pnl = round(pnl + tp1_pnl, 2)
 
-                        if pnl >= 0:
-                            if risk_manager:
-                                risk_manager.daily_wins += 1
-                            notify_trade_win(
-                                ticker=trade.ticker,
-                                side=trade.side,
-                                entry=trade.entry_price,
-                                exit_price=current_price,
-                                pnl=pnl,
-                                r_multiple=r_multiple,
-                                exit_reason="Manual /closeall",
-                            )
-                        else:
-                            if risk_manager:
-                                risk_manager.record_loss()
-                            notify_trade_loss(
-                                ticker=trade.ticker,
-                                side=trade.side,
-                                entry=trade.entry_price,
-                                exit_price=current_price,
-                                pnl=pnl,
-                                r_multiple=r_multiple,
-                                exit_reason="Manual /closeall",
-                            )
+                        risk = getattr(trade, "risk_amount", 0)
+                        r_multiple = round(total_pnl / risk, 2) if risk > 0 else 0.0
+
+                        if risk_manager:
+                            if total_pnl >= 0:
+                                risk_manager.record_win(total_pnl, r_multiple)
+                            else:
+                                risk_manager.record_loss(total_pnl, r_multiple)
+
+                        notify_trade_closed(
+                            ticker=trade.ticker,
+                            side=trade.side,
+                            entry_price=trade.entry_price,
+                            exit_price=current_price,
+                            quantity=qty,
+                            total_profit=total_pnl,
+                            r_achieved=r_multiple,
+                            exit_reason="Manual /closeall",
+                            tp1_profit=tp1_pnl,
+                        )
                     except Exception as e:
                         _send(f"⚠️ خطأ في حساب P&L لـ {trade.ticker}: {e}")
 
