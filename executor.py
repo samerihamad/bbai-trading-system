@@ -743,6 +743,13 @@ def update_trailing_stop(trade: "OpenTrade", current_price: float) -> dict:
 
     max_updates = getattr(_config, "TRAILING_MAX_UPDATES", 200)
     if trade.trail_update_count >= max_updates:
+        # إشعار مرة واحدة فقط عند بلوغ الحد بالضبط
+        if trade.trail_update_count == max_updates:
+            try:
+                from notifier import notify_trailing_max_reached
+                notify_trailing_max_reached(trade.ticker, trade.trail_update_count)
+            except Exception:
+                pass
         return {"status": "max_reached"}
 
     try:
@@ -756,10 +763,18 @@ def update_trailing_stop(trade: "OpenTrade", current_price: float) -> dict:
         buf_pct = getattr(_config, "TRAILING_BUFFER_PCT", 0.001)
         tf      = getattr(_config, "TRAILING_ATR_TIMEFRAME", "15Min")
 
-        # جلب ATR الحالي (يتجاوز ATR الفتح إذا تغير التقلب)
-        live_atr = get_current_atr(trade.ticker, timeframe=tf)
-        if live_atr > 0:
-            trade.current_atr = live_atr
+        # ── تحديث ATR كل 6 تحديثات فقط (لتقليل طلبات API)
+        # عند trail_update_count = 0, 6, 12, 18, ... → يجلب ATR جديد
+        # بين هذه النقاط → يستخدم current_atr المحفوظ
+        ATR_REFRESH_EVERY = 6
+        should_refresh_atr = (
+            trade.current_atr == 0 or
+            trade.trail_update_count % ATR_REFRESH_EVERY == 0
+        )
+        if should_refresh_atr:
+            live_atr = get_current_atr(trade.ticker, timeframe=tf)
+            if live_atr > 0:
+                trade.current_atr = live_atr
 
         effective_atr = trade.current_atr if trade.current_atr > 0 else trade.trail_step
         if effective_atr <= 0:
@@ -777,10 +792,25 @@ def update_trailing_stop(trade: "OpenTrade", current_price: float) -> dict:
 
             # فقط إذا الـ stop الجديد أعلى من القديم (لا ننزل الـ stop أبداً)
             if new_stop > trade.stop_loss:
+                old_stop = trade.stop_loss
                 trade.stop_loss          = new_stop
                 trade.trail_update_count += 1
                 print(f"  📈 Trailing LONG {trade.ticker}: highest=${trade.highest_price:.2f} | "
                       f"trail={trail_step:.4f} | new_stop=${new_stop:.2f} [#{trade.trail_update_count}]")
+                # إشعار Telegram عند تحريك كبير (> 1R)
+                risk = getattr(trade, "risk_amount", 0)
+                r_moved = round((new_stop - old_stop) / risk, 2) if risk > 0 else 0.0
+                if abs(r_moved) >= 1.0:
+                    try:
+                        from notifier import notify_trailing_update
+                        notify_trailing_update(
+                            ticker=trade.ticker, side="long",
+                            old_stop=old_stop, new_stop=new_stop,
+                            current_price=current_price,
+                            r_moved=r_moved, update_count=trade.trail_update_count,
+                        )
+                    except Exception:
+                        pass
                 return {"status": "updated", "new_stop": new_stop}
 
         elif trade.side == "short":
@@ -792,10 +822,25 @@ def update_trailing_stop(trade: "OpenTrade", current_price: float) -> dict:
 
             # فقط إذا الـ stop الجديد أقل من القديم (لا نرفع الـ stop أبداً)
             if new_stop < trade.stop_loss:
+                old_stop = trade.stop_loss
                 trade.stop_loss          = new_stop
                 trade.trail_update_count += 1
                 print(f"  📉 Trailing SHORT {trade.ticker}: lowest=${trade.lowest_price:.2f} | "
                       f"trail={trail_step:.4f} | new_stop=${new_stop:.2f} [#{trade.trail_update_count}]")
+                # إشعار Telegram عند تحريك كبير (> 1R)
+                risk = getattr(trade, "risk_amount", 0)
+                r_moved = round((old_stop - new_stop) / risk, 2) if risk > 0 else 0.0
+                if abs(r_moved) >= 1.0:
+                    try:
+                        from notifier import notify_trailing_update
+                        notify_trailing_update(
+                            ticker=trade.ticker, side="short",
+                            old_stop=old_stop, new_stop=new_stop,
+                            current_price=current_price,
+                            r_moved=r_moved, update_count=trade.trail_update_count,
+                        )
+                    except Exception:
+                        pass
                 return {"status": "updated", "new_stop": new_stop}
 
         return {"status": "no_change", "new_stop": trade.stop_loss}
