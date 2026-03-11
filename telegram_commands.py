@@ -23,57 +23,32 @@ TZ = pytz.timezone(TIMEZONE)
 DISK_PATH         = os.getenv("RENDER_DISK_PATH", "logs")
 MAINTENANCE_FLAG  = os.path.join(DISK_PATH, ".maintenance")
 
-# Render API — لإيقاف/تشغيل الـ service فعلياً
-RENDER_API_KEY    = os.getenv("RENDER_API_KEY", "")
-RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
+# Render Deploy Hook — الرابط الذي يُشغّل Deploy يدوياً
+# من Render Dashboard → Service → Settings → Deploy Hook → نسخ الرابط
+RENDER_DEPLOY_HOOK = os.getenv("RENDER_DEPLOY_HOOK", "")
 
 
-def _render_suspend() -> bool:
+def _trigger_deploy() -> bool:
     """
-    يُوقف الـ Render service فعلياً عبر Render API.
-    يحتاج متغيرين في Render Environment Variables:
-      RENDER_API_KEY    → من render.com → Account → API Keys
-      RENDER_SERVICE_ID → من URL الـ service (srv-xxxxxxx)
+    يُشغّل Deploy جديد في Render عبر Deploy Hook.
+    يُستدعى عند /deploy — بعد انتهاء رفع الملفات على GitHub.
     """
-    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
-        print("⚠️  RENDER_API_KEY أو RENDER_SERVICE_ID غير موجود — السيرفر لن يتوقف تلقائياً", flush=True)
+    if not RENDER_DEPLOY_HOOK:
+        print("⚠️  RENDER_DEPLOY_HOOK غير موجود في Environment Variables", flush=True)
         return False
     try:
         import requests as _req
-        resp = _req.post(
-            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/suspend",
-            headers={"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json"},
-            timeout=10,
-        )
+        resp = _req.post(RENDER_DEPLOY_HOOK, timeout=15)
         if resp.status_code in (200, 201, 202):
-            print("✅ Render service suspended via API", flush=True)
+            print("✅ Render Deploy triggered via Hook", flush=True)
             return True
-        print(f"⚠️  Render suspend failed: HTTP {resp.status_code}", flush=True)
+        print(f"⚠️  Deploy Hook failed: HTTP {resp.status_code}", flush=True)
         return False
     except Exception as e:
-        print(f"⚠️  Render API error: {e}", flush=True)
+        print(f"⚠️  Deploy Hook error: {e}", flush=True)
         return False
 
 
-def _render_resume() -> bool:
-    """يُعيد تشغيل الـ Render service عبر Render API عند /resume."""
-    if not RENDER_API_KEY or not RENDER_SERVICE_ID:
-        return False
-    try:
-        import requests as _req
-        resp = _req.post(
-            f"https://api.render.com/v1/services/{RENDER_SERVICE_ID}/resume",
-            headers={"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json"},
-            timeout=10,
-        )
-        if resp.status_code in (200, 201, 202):
-            print("✅ Render service resumed via API", flush=True)
-            return True
-        print(f"⚠️  Render resume failed: HTTP {resp.status_code}", flush=True)
-        return False
-    except Exception as e:
-        print(f"⚠️  Render API error: {e}", flush=True)
-        return False
 
 
 # -----------------------------------------
@@ -83,13 +58,17 @@ def _render_resume() -> bool:
 class SystemState:
     def __init__(self):
         self._last_update_id : int = 0
-        # ── قراءة الـ flag من الـ disk عند كل startup
-        # هذا يضمن أن Deploy جديد يحترم قرار الصيانة السابق
+        # ── منطق الـ flag عند Startup:
+        # السيرفر لا يعمل أثناء الصيانة (Render suspended).
+        # إذا وصلنا لهنا = السيرفر بدأ من جديد = Resume تم من Render Dashboard.
+        # إذن: نحذف الـ flag تلقائياً ونبدأ التداول طبيعي.
         if os.path.exists(MAINTENANCE_FLAG):
-            self.maintenance_mode = True
-            print("🔧 MAINTENANCE FLAG found on disk — system stays in maintenance mode", flush=True)
-        else:
-            self.maintenance_mode = False
+            try:
+                os.remove(MAINTENANCE_FLAG)
+                print("🔧 Maintenance flag cleared on startup — resuming normally", flush=True)
+            except Exception:
+                pass
+        self.maintenance_mode = False
 
     def enter_maintenance(self):
         """يُفعّل وضع الصيانة ويكتب الـ flag على الـ disk."""
@@ -181,39 +160,23 @@ def _handle_command(command: str, context: dict):
         open_trades = context.get("open_trades", [])
         system_state.enter_maintenance()
 
-        # ── محاولة إيقاف السيرفر عبر Render API
-        render_stopped = _render_suspend()
-
-        if render_stopped:
-            server_msg = (
-                "🔴 <b>السيرفر متوقف تلقائياً</b>\n"
-                "✅ ارفع ملفاتك على GitHub\n"
-                "✅ ثم اضغط <b>Resume</b> في Render Dashboard\n"
-                "   أو أرسل /resume من Telegram\n"
-            )
-        else:
-            server_msg = (
-                "⚠️ <b>السيرفر لم يتوقف تلقائياً</b>\n"
-                "   (أضف RENDER_API_KEY + RENDER_SERVICE_ID للإيقاف التلقائي)\n"
-                "✅ ارفع ملفاتك على GitHub\n"
-                "✅ ثم اضغط Manual Deploy في Render\n"
-                "⚠️ <b>النظام سينتظر /resume قبل التداول</b>\n"
-            )
-
         _send(
             "🔧 <b>MAINTENANCE MODE | وضع الصيانة</b>\n"
             f"🕐 {now_str}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "⛔ <b>التداول متوقف كلياً</b>\n"
+            "⛔ <b>التداول متوقف — السيرفر يعمل</b>\n"
             f"📊 الصفقات المفتوحة: {len(open_trades)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"{server_msg}"
+            "📋 <b>الخطوات:</b>\n"
+            "1️⃣ عدّل ملفاتك وارفعها على GitHub\n"
+            "2️⃣ عندما تنتهي تماماً → أرسل /deploy\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "أرسل /resume عند الانتهاء من الصيانة."
+            "⚠️ لا تضغط Deploy في Render يدوياً\n"
+            "   /deploy سيتكفل بكل شيء عند جهوزيتك."
         )
         print(f"[{now_str}]  MAINTENANCE MODE ON -- System paused", flush=True)
 
-    # ── /resume : استئناف النظام بعد الصيانة
+    # ── /resume : يُستخدم فقط إذا السيرفر لا يزال يعمل (بدون Render suspend)
     elif command == "/resume":
         if not system_state.maintenance_mode:
             _send(
@@ -224,9 +187,6 @@ def _handle_command(command: str, context: dict):
             return
 
         system_state.exit_maintenance()
-
-        # ── استئناف السيرفر إذا كان موقوفاً عبر Render API
-        _render_resume()
 
         _send(
             "✅ <b>System Resumed | تم استئناف النظام</b>\n"
@@ -371,15 +331,48 @@ def _handle_command(command: str, context: dict):
             except Exception as e:
                 _send(f"❌ خطأ في إغلاق المراكز: {e}")
 
+    # ── /deploy : تشغيل Deploy جديد بعد رفع الملفات على GitHub
+    elif command == "/deploy":
+        if not system_state.maintenance_mode:
+            _send(
+                "⚠️ <b>النظام ليس في وضع الصيانة</b>\n"
+                f"🕐 {now_str}\n"
+                "أرسل /maintenance أولاً قبل /deploy."
+            )
+            return
+
+        _send(
+            "🚀 <b>جاري تشغيل Deploy...</b>\n"
+            f"🕐 {now_str}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "⏳ سيبدأ Render بسحب الكود من GitHub الآن.\n"
+            "⏳ انتظر دقيقة حتى يكتمل الـ Deploy.\n"
+            "📊 راقب Render Dashboard للتأكد."
+        )
+
+        success = _trigger_deploy()
+
+        if success:
+            system_state.exit_maintenance()
+            print(f"[{now_str}]  DEPLOY triggered -- maintenance mode OFF", flush=True)
+        else:
+            _send(
+                "❌ <b>فشل تشغيل Deploy</b>\n"
+                "تأكد من إضافة RENDER_DEPLOY_HOOK في Environment Variables.\n"
+                "أو شغّل Manual Deploy من Render Dashboard."
+            )
+
     # ── /help
     elif command == "/help":
         _send(
             "📖 <b>BBAI Trading System Commands</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "🔧 /maintenance\n"
-            "    إيقاف النظام كلياً للصيانة\n\n"
+            "    إيقاف التداول — ابدأ من هنا قبل رفع الملفات\n\n"
+            "🚀 /deploy\n"
+            "    بعد رفع الملفات على GitHub → شغّل Deploy\n\n"
             "✅ /resume\n"
-            "    استئناف النظام بعد الصيانة\n\n"
+            "    استئناف التداول بدون Deploy جديد\n\n"
             "📊 /status\n"
             "    عرض حالة النظام الآن\n\n"
             "🚨 /closeall\n"
