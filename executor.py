@@ -103,6 +103,65 @@ def _save_open_trades(trades: list) -> None:
         print(f"⚠️  فشل حفظ الصفقات المفتوحة: {e}")
 
 
+# ─────────────────────────────────────────
+# حفظ/قراءة الـ Daily Flags من Google Sheets
+# ─────────────────────────────────────────
+FLAGS_SHEET = "System Flags"
+
+def save_flags_to_sheets(flags: dict) -> None:
+    """يحفظ الـ daily flags في Google Sheets — يبقى بعد كل Deploy."""
+    try:
+        import gspread, json as _j
+        gc = _get_sheets_client()
+        if not gc:
+            return
+        ss = gc.open_by_key(SHEET_ID)
+        try:
+            ws = ss.worksheet(FLAGS_SHEET)
+        except Exception:
+            ws = ss.add_worksheet(title=FLAGS_SHEET, rows=10, cols=2)
+            ws.update("A1:B1", [["key", "value"]])
+
+        import json
+        from datetime import datetime
+        import pytz
+        today = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+        data = {**flags, "date": today}
+        ws.update("A2:B2", [["flags", json.dumps(data)]])
+    except Exception as e:
+        print(f"⚠️  فشل حفظ الـ flags في Sheets: {e}")
+
+
+def load_flags_from_sheets() -> dict:
+    """يقرأ الـ daily flags من Google Sheets عند Startup."""
+    try:
+        import gspread, json as _j
+        gc = _get_sheets_client()
+        if not gc:
+            return {}
+        ss = gc.open_by_key(SHEET_ID)
+        try:
+            ws = ss.worksheet(FLAGS_SHEET)
+        except Exception:
+            return {}
+
+        from datetime import datetime
+        import pytz, json
+        today = datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+
+        rows = ws.get_all_values()
+        for row in rows[1:]:  # تخطي الـ header
+            if len(row) >= 2 and row[0] == "flags":
+                data = json.loads(row[1])
+                if data.get("date") == today:
+                    print(f"📂 Flags from Sheets: {data}", flush=True)
+                    return data
+        return {}
+    except Exception as e:
+        print(f"⚠️  فشل قراءة الـ flags من Sheets: {e}")
+        return {}
+
+
 def _delete_open_trades_sheets() -> None:
     ws = _get_open_trades_ws()
     if not ws:
