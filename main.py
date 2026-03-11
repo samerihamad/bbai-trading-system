@@ -88,14 +88,17 @@ def _load_flags_from_disk() -> dict:
         if not os.path.exists(_FLAGS_FILE):
             return {}
         import json
+        from datetime import datetime as _dt
+        import pytz as _pytz
+        today = _dt.now(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
         with open(_FLAGS_FILE) as f:
             data = json.load(f)
         # تحقق أن البيانات لليوم الحالي فقط
-        today = get_ny_time().strftime("%Y-%m-%d")
         if data.get("date") != today:
             return {}  # يوم مختلف → تجاهل
         return data
-    except Exception:
+    except Exception as e:
+        print(f"⚠️  _load_flags_from_disk error: {e}", flush=True)
         return {}
 
 
@@ -103,9 +106,12 @@ def _save_flags_to_disk():
     """يحفظ الـ flags الحالية على الـ Disk."""
     try:
         import json
+        from datetime import datetime as _dt
+        import pytz as _pytz
+        today = _dt.now(_pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
         os.makedirs(_DISK_PATH, exist_ok=True)
         data = {
-            "date":             get_ny_time().strftime("%Y-%m-%d"),
+            "date":             today,
             "pre_alert_done":   _flags["pre_alert_done"],
             "pre_market_done":  _flags["pre_market_done"],
             "close_done":       _flags["close_done"],
@@ -753,6 +759,14 @@ def main():
         open_trades.extend(recovered)
         log(f"Recovered {len(recovered)} open position(s) -- will monitor them")
     log("-" * 55)
+
+    # ── إشعار Telegram: النظام انطلق بنجاح
+    try:
+        from notifier import notify_system_started
+        balance = account.get("balance", 0) if account else 0
+        notify_system_started(balance=balance, open_trades=len(open_trades))
+    except Exception as e:
+        log(f"Startup notification error: {e}")
 
     # الحلقة الرئيسية
     while True:
