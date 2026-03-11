@@ -169,6 +169,58 @@ def notify_trade_win(
     return _send(msg)
 
 
+def notify_trailing_update(
+    ticker: str,
+    side: str,
+    old_stop: float,
+    new_stop: float,
+    current_price: float,
+    r_moved: float,
+    update_count: int,
+) -> bool:
+    """
+    يُرسل إشعار Telegram عند تحريك Trailing Stop بشكل كبير (> 1R).
+    لا يُرسل عند كل تحديث — فقط عند التحريكات المهمة.
+    """
+    direction = "📈" if side == "long" else "📉"
+    side_ar   = "شراء" if side == "long" else "مكشوف"
+    moved     = round(abs(new_stop - old_stop), 4)
+
+    msg = (
+        f"🔄 <b>Trailing Stop — {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🇬🇧 English\n\n"
+        f"{direction} Side       : {side.upper()}\n"
+        f"💰 Price      : ${current_price:.2f}\n"
+        f"🔒 Old Stop   : ${old_stop:.2f}\n"
+        f"🔒 New Stop   : ${new_stop:.2f}  (+${moved:.4f})\n"
+        f"🎯 R Moved    : {r_moved:+.2f}R\n"
+        f"🔢 Update #   : {update_count}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🇦🇪 العربية\n\n"
+        f"{direction} الاتجاه    : {side_ar}\n"
+        f"💰 السعر الحالي : ${current_price:.2f}\n"
+        f"🔒 الوقف القديم : ${old_stop:.2f}\n"
+        f"🔒 الوقف الجديد : ${new_stop:.2f}\n"
+        f"🎯 المسافة      : {r_moved:+.2f}R\n"
+    )
+    return _send(msg)
+
+
+def notify_trailing_max_reached(ticker: str, update_count: int) -> bool:
+    """يُرسل إشعار عند بلوغ الحد الأقصى لتحديثات الـ Trailing."""
+    msg = (
+        f"⚠️ <b>Trailing Max Reached — {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"وصل عداد الـ Trailing لـ {update_count} تحديث.\n"
+        f"تم إيقاف التحديث التلقائي — الـ Stop الحالي ثابت.\n"
+        f"راقب الصفقة يدوياً إذا لزم."
+    )
+    return _send(msg)
+
+
 def notify_trade_loss(
     ticker: str, entry_price: float, exit_price: float,
     quantity: int, loss: float, daily_losses: int,
