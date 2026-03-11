@@ -48,6 +48,9 @@ from notifier         import (
     notify_trade_loss,
     notify_stop_updated,
     notify_system_stopped,
+    notify_tp1_hit,
+    notify_tp2_hit,
+    notify_trade_closed,
 )
 from telegram_commands import (
     system_state,
@@ -309,20 +312,24 @@ def monitor_open_trades():
                     if outcome == "win":
                         risk_manager.record_win(total_pnl, r)
                         try:
-                            notify_trade_win(
-                                ticker=trade.ticker, entry_price=trade.entry_price,
-                                exit_price=price, quantity=exit_qty,
-                                profit=total_pnl, r_achieved=r,
+                            notify_trade_closed(
+                                ticker=trade.ticker, side=side,
+                                entry_price=trade.entry_price, exit_price=price,
+                                quantity=exit_qty, total_profit=total_pnl,
+                                r_achieved=r, exit_reason="Stop (after TP1)",
+                                tp1_profit=trade.tp1_pnl,
                             )
                         except Exception as e:
                             log(f"Telegram error: {e}")
                     else:
                         stopped = risk_manager.record_loss(total_pnl, r)
                         try:
-                            notify_trade_loss(
-                                ticker=trade.ticker, entry_price=trade.entry_price,
-                                exit_price=price, quantity=exit_qty,
-                                loss=abs(total_pnl), daily_losses=risk_manager.daily_losses,
+                            notify_trade_closed(
+                                ticker=trade.ticker, side=side,
+                                entry_price=trade.entry_price, exit_price=price,
+                                quantity=exit_qty, total_profit=total_pnl,
+                                r_achieved=r, exit_reason="Stop (after TP1)",
+                                tp1_profit=trade.tp1_pnl,
                             )
                             if stopped:
                                 notify_system_stopped()
@@ -332,10 +339,11 @@ def monitor_open_trades():
                     # Stop بدون TP1 → خسارة كاملة
                     stopped = risk_manager.record_loss(pnl, r)
                     try:
-                        notify_trade_loss(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=exit_qty,
-                            loss=abs(pnl), daily_losses=risk_manager.daily_losses,
+                        notify_trade_closed(
+                            ticker=trade.ticker, side=side,
+                            entry_price=trade.entry_price, exit_price=price,
+                            quantity=exit_qty, total_profit=pnl,
+                            r_achieved=r, exit_reason="Stop Loss",
                         )
                         if stopped:
                             notify_system_stopped()
@@ -362,19 +370,22 @@ def monitor_open_trades():
                 )
                 risk_manager.record_win(pnl_tp1, r)
                 try:
-                    notify_trade_win(
-                        ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=tp1_qty,
-                        profit=pnl_tp1, r_achieved=r,
-                    )
-                    notify_stop_updated(
-                        ticker=trade.ticker, old_stop=trade.stop_loss,
-                        new_stop=new_stop, current_price=price,
+                    notify_tp1_hit(
+                        ticker=trade.ticker, side=side,
+                        entry_price=trade.entry_price, tp1_price=price,
+                        qty_tp1=tp1_qty, profit_tp1=pnl_tp1,
+                        r_achieved=r,
+                        qty_remaining=trade.quantity_remaining - tp1_qty,
+                        tp2_price=trade.target_tp2,
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
                 trade.tp1_hit              = True
-                trade.tp1_pnl              = pnl_tp1   # ← نحفظ ربح TP1 للاستخدام لاحقاً
+                trade.tp1_pnl              = pnl_tp1
+                # ── تفعيل Trailing Stop المتقدم
+                trade.trailing_active      = True
+                trade.highest_price        = price   # نبدأ من سعر TP1
+                trade.lowest_price         = price
                 trade.closing_in_progress  = False   # ← الصفقة لا تزال مفتوحة
                 trade.stop_loss = new_stop
                 # ── تحديث الوقف الفعلي في Alpaca (نقل للتعادل)
@@ -408,11 +419,21 @@ def monitor_open_trades():
                 )
                 risk_manager.record_win(total_pnl, r)
                 try:
-                    notify_trade_win(
-                        ticker=trade.ticker, entry_price=trade.entry_price,
-                        exit_price=price, quantity=exit_qty,
-                        profit=total_pnl, r_achieved=r,
-                    )
+                    if trade.tp1_hit:
+                        notify_tp2_hit(
+                            ticker=trade.ticker, side=side,
+                            entry_price=trade.entry_price, tp2_price=price,
+                            qty_tp2=exit_qty, profit_tp2=pnl,
+                            r_achieved=r,
+                            profit_tp1=trade.tp1_pnl, total_profit=total_pnl,
+                        )
+                    else:
+                        notify_trade_closed(
+                            ticker=trade.ticker, side=side,
+                            entry_price=trade.entry_price, exit_price=price,
+                            quantity=exit_qty, total_profit=total_pnl,
+                            r_achieved=r, exit_reason="Target",
+                        )
                 except Exception as e:
                     log(f"Telegram error: {e}")
                 trades_to_remove.append(trade)
@@ -713,8 +734,14 @@ def main():
                 run_market_close()
 
             else:
-                day_str = "Weekend" if not is_weekday() else "After hours"
-                log(f"{day_str} | {t} {TIMEZONE} | Next open: {get_next_market_open()}")
+                if is_weekday():
+                    t_now = get_ny_time().strftime("%H:%M")
+                    if "09:30" <= t_now < "09:35":
+                        log(f"⏳ السوق فتح — ننتظر 09:35 لتشغيل Pre-Market | {t_now}")
+                    else:
+                        log(f"After hours | {t} {TIMEZONE} | Next open: {get_next_market_open()}")
+                else:
+                    log(f"Weekend | {t} {TIMEZONE} | Next open: {get_next_market_open()}")
 
             # إعادة ضبط عداد الأخطاء عند نجاح الدورة
             if _consecutive_errors > 0:
