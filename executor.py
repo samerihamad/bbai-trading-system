@@ -1044,6 +1044,24 @@ def open_meanrev_trade(
     except Exception as e:
         print(f"⚠️  فشل فحص الـ position لـ {signal.ticker}: {e}")
 
+    # ── فحص قابلية الـ SHORT قبل فتح أي صفقة مكشوفة
+    if signal.side == "short":
+        try:
+            asset_resp = requests.get(
+                f"{ALPACA_BASE_URL}/v2/assets/{signal.ticker}",
+                headers=HEADERS, timeout=8,
+            )
+            if asset_resp.status_code == 200:
+                asset_data = asset_resp.json()
+                shortable      = asset_data.get("shortable", False)
+                easy_to_borrow = asset_data.get("easy_to_borrow", False)
+                if not shortable or not easy_to_borrow:
+                    print(f"⛔ رُفض {signal.ticker} SHORT — غير قابل للمكشوف في Alpaca "
+                          f"(shortable={shortable}, easy_to_borrow={easy_to_borrow})")
+                    return None
+        except Exception as e:
+            print(f"⚠️  فشل فحص shortable لـ {signal.ticker}: {e}")
+
     # ── حساب نسبة المخاطرة الديناميكية من الـ Score
     from risk import dynamic_risk_pct
     sig_score    = getattr(signal, "score", 0)
