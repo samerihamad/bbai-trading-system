@@ -28,6 +28,17 @@ OPEN_TRADES_SHEET  = "Open Trades"
 CLOSED_TRADES_SHEET = "Closed Trades"
 CREDENTIALS_ENV   = "GOOGLE_CREDENTIALS_JSON"
 
+# Headers الرسمية لـ Open Trades — تُستخدم عند الإنشاء وعند get_all_records
+OPEN_HEADERS = [
+    "ticker","strategy","side","order_id",
+    "entry_price","stop_loss","target",
+    "target_tp1","target_tp2","trail_stop","trail_step",
+    "quantity","quantity_remaining","tp1_hit",
+    "peak_price","risk_amount","opened_at",
+    "trailing_active","highest_price","lowest_price",
+    "current_atr","trail_update_count","tp1_pnl"
+]
+
 
 def _get_sheets_client():
     try:
@@ -57,15 +68,7 @@ def _get_open_trades_ws():
         try:
             return ss.worksheet(OPEN_TRADES_SHEET)
         except Exception:
-            headers = [
-                "ticker","strategy","side","order_id",
-                "entry_price","stop_loss","target",
-                "target_tp1","target_tp2","trail_stop","trail_step",
-                "quantity","quantity_remaining","tp1_hit",
-                "peak_price","risk_amount","opened_at",
-                "trailing_active","highest_price","lowest_price",
-                "current_atr","trail_update_count","tp1_pnl"
-            ]
+            headers = OPEN_HEADERS
             ws = ss.add_worksheet(title=OPEN_TRADES_SHEET, rows=100, cols=len(headers))
             ws.append_row(headers)
             return ws
@@ -190,7 +193,21 @@ def _load_open_trades_from_sheets() -> list:
     if not ws:
         return []
     try:
-        rows = ws.get_all_records()
+        # ── إصلاح Headers المكررة تلقائياً قبل القراءة
+        # السبب: إضافة حقول جديدة في جلسات مختلفة قد تخلق أعمدة مكررة
+        try:
+            current_headers = ws.row_values(1)
+            if len(current_headers) != len(set(current_headers)) or current_headers != OPEN_HEADERS:
+                print("  🔧 إصلاح headers مكررة/قديمة في Open Trades sheet...")
+                ws.resize(rows=1)           # احذف كل الصفوف
+                ws.resize(rows=100)
+                ws.update("A1", [OPEN_HEADERS])  # أعد كتابة الـ headers الصحيحة
+                print("  ✅ تم إصلاح headers — الـ sheet فارغ الآن (لا يوجد بيانات قديمة)")
+                return []
+        except Exception as e:
+            print(f"  ⚠️  فشل فحص headers: {e}")
+
+        rows = ws.get_all_records(expected_headers=OPEN_HEADERS)
         if not rows:
             return []
         import pytz
