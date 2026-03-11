@@ -144,29 +144,151 @@ def notify_stop_updated(
     return _send(msg)
 
 
+def notify_tp1_hit(
+    ticker: str, side: str,
+    entry_price: float, tp1_price: float,
+    qty_tp1: int, profit_tp1: float,
+    r_achieved: float, qty_remaining: int,
+    tp2_price: float,
+) -> bool:
+    """رسالة واضحة عند ضرب الهدف الأول — الصفقة لا تزال مفتوحة."""
+    direction = "📈 BUY" if side == "long" else "📉 SHORT"
+    direction_ar = "شراء" if side == "long" else "مكشوف"
+    msg = (
+        f"🎯 <b>TP1 HIT ✅ — {ticker}</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇬🇧 <b>English</b>\n\n"
+        f"{direction}\n"
+        f"💰 Entry        : ${entry_price:.2f}\n"
+        f"🎯 TP1 Exit     : ${tp1_price:.2f}\n"
+        f"🔢 Qty Closed   : {qty_tp1} shares\n"
+        f"📈 Profit TP1   : <b>+${profit_tp1:.2f}</b>\n"
+        f"🎯 R            : {r_achieved:.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔓 Still Open   : {qty_remaining} shares → TP2 @ ${tp2_price:.2f}\n"
+        f"🔒 Stop → moved to breakeven\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇦🇪 <b>العربية</b>\n\n"
+        f"{direction_ar}\n"
+        f"💰 الدخول         : ${entry_price:.2f}\n"
+        f"🎯 خروج TP1       : ${tp1_price:.2f}\n"
+        f"🔢 الكمية المغلقة : {qty_tp1} سهم\n"
+        f"📈 ربح TP1        : <b>+${profit_tp1:.2f}</b>\n"
+        f"🎯 النسبة         : {r_achieved:.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔓 لا تزال مفتوحة : {qty_remaining} سهم → TP2 @ ${tp2_price:.2f}\n"
+        f"🔒 الوقف → انتقل للتعادل"
+    )
+    return _send(msg)
+
+
+def notify_tp2_hit(
+    ticker: str, side: str,
+    entry_price: float, tp2_price: float,
+    qty_tp2: int, profit_tp2: float,
+    r_achieved: float,
+    profit_tp1: float, total_profit: float,
+) -> bool:
+    """رسالة واضحة عند ضرب الهدف الثاني — الصفقة مغلقة بالكامل."""
+    direction = "📈 BUY" if side == "long" else "📉 SHORT"
+    direction_ar = "شراء" if side == "long" else "مكشوف"
+    msg = (
+        f"🏆 <b>TP2 HIT ✅ — {ticker} — TRADE CLOSED</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇬🇧 <b>English</b>\n\n"
+        f"{direction}\n"
+        f"💰 Entry        : ${entry_price:.2f}\n"
+        f"🏆 TP2 Exit     : ${tp2_price:.2f}\n"
+        f"🔢 Qty Closed   : {qty_tp2} shares\n"
+        f"📈 Profit TP2   : <b>+${profit_tp2:.2f}</b>\n"
+        f"🎯 R            : {r_achieved:.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 TP1 Profit   : +${profit_tp1:.2f}\n"
+        f"📊 TP2 Profit   : +${profit_tp2:.2f}\n"
+        f"💰 Total Profit : <b>+${total_profit:.2f}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇦🇪 <b>العربية</b>\n\n"
+        f"{direction_ar}\n"
+        f"💰 الدخول         : ${entry_price:.2f}\n"
+        f"🏆 خروج TP2       : ${tp2_price:.2f}\n"
+        f"🔢 الكمية المغلقة : {qty_tp2} سهم\n"
+        f"📈 ربح TP2        : <b>+${profit_tp2:.2f}</b>\n"
+        f"🎯 النسبة         : {r_achieved:.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 ربح TP1        : +${profit_tp1:.2f}\n"
+        f"📊 ربح TP2        : +${profit_tp2:.2f}\n"
+        f"💰 إجمالي الربح   : <b>+${total_profit:.2f}</b>\n"
+        "✅ <b>الصفقة مغلقة بالكامل</b>"
+    )
+    return _send(msg)
+
+
+def notify_trade_closed(
+    ticker: str, side: str,
+    entry_price: float, exit_price: float,
+    quantity: int, total_profit: float,
+    r_achieved: float, exit_reason: str,
+    tp1_profit: float = 0.0,
+) -> bool:
+    """
+    رسالة الإغلاق النهائي للصفقة — تُستخدم عند:
+    - Stop بعد TP1 (ربح أو خسارة)
+    - Stop بدون TP1 (خسارة كاملة)
+    - Manual Close (/closeall)
+    """
+    is_win   = total_profit > 0
+    emoji    = "✅ WIN" if is_win else "❌ LOSS"
+    pnl_sign = "+" if is_win else ""
+    pnl_emoji = "📈" if is_win else "📉"
+    direction_ar = "شراء" if side == "long" else "مكشوف"
+
+    # هل مرّت بـ TP1 قبل الإغلاق؟
+    tp1_line = f"📊 TP1 Profit  : +${tp1_profit:.2f}\n" if tp1_profit > 0 else ""
+    tp1_line_ar = f"📊 ربح TP1     : +${tp1_profit:.2f}\n" if tp1_profit > 0 else ""
+
+    msg = (
+        f"{emoji} — <b>{ticker} — TRADE CLOSED</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇬🇧 <b>English</b>\n\n"
+        f"{'📈 BUY' if side == 'long' else '📉 SHORT'}\n"
+        f"💰 Entry        : ${entry_price:.2f}\n"
+        f"💰 Exit         : ${exit_price:.2f}\n"
+        f"🔢 Qty          : {quantity} shares\n"
+        f"🚪 Reason       : {exit_reason}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{tp1_line}"
+        f"{pnl_emoji} Total P&L    : <b>{pnl_sign}${total_profit:.2f}</b>\n"
+        f"🎯 R            : {pnl_sign}{r_achieved:.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🇦🇪 <b>العربية</b>\n\n"
+        f"{direction_ar}\n"
+        f"💰 الدخول         : ${entry_price:.2f}\n"
+        f"💰 الخروج         : ${exit_price:.2f}\n"
+        f"🔢 الكمية         : {quantity} سهم\n"
+        f"🚪 السبب          : {exit_reason}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{tp1_line_ar}"
+        f"{pnl_emoji} إجمالي الربح  : <b>{pnl_sign}${total_profit:.2f}</b>\n"
+        f"🎯 النسبة         : {pnl_sign}{r_achieved:.2f}R\n"
+        f"{'✅ صفقة رابحة' if is_win else '❌ صفقة خاسرة'}"
+    )
+    return _send(msg)
+
+
 def notify_trade_win(
     ticker: str, entry_price: float, exit_price: float,
     quantity: int, profit: float, r_achieved: float,
 ) -> bool:
-    msg = (
-        f"✅ <b>WIN -- {ticker}</b>\n"
-        f"🕐 {_now()}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🇬🇧 <b>English</b>\n"
-        f"💰 Entry   : ${entry_price:.2f}\n"
-        f"💰 Exit    : ${exit_price:.2f}\n"
-        f"🔢 Qty     : {quantity} shares\n"
-        f"📈 Profit  : <b>+${profit:.2f}</b>\n"
-        f"🎯 R       : {r_achieved:.2f}R\n"
-        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🇦🇪 <b>العربية</b>\n"
-        f"💰 الدخول  : ${entry_price:.2f}\n"
-        f"💰 الخروج  : ${exit_price:.2f}\n"
-        f"🔢 الكمية  : {quantity} سهم\n"
-        f"📈 الربح   : <b>+${profit:.2f}</b>\n"
-        f"🎯 النسبة  : {r_achieved:.2f}R"
+    """دالة قديمة للتوافق — تستدعي notify_trade_closed داخلياً."""
+    return notify_trade_closed(
+        ticker=ticker, side="long",
+        entry_price=entry_price, exit_price=exit_price,
+        quantity=quantity, total_profit=profit,
+        r_achieved=r_achieved, exit_reason="Target",
     )
-    return _send(msg)
 
 
 def notify_trailing_update(
