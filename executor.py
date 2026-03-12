@@ -820,7 +820,7 @@ def monitor_trade(trade: OpenTrade) -> dict:
         (trade.side == "short" and not trade.tp1_hit and current_price <= trade.target_tp1)
     )
     if tp1_hit:
-        tp1_qty  = trade.quantity - trade.quantity_remaining
+        tp1_qty  = trade.quantity // 2  # نصف الكمية الأصلية دائماً
         new_stop = trade.entry_price  # نقل الوقف إلى نقطة التعادل
         return {"status": "tp1_hit", "price": current_price,
                 "r": r_current, "new_stop": new_stop, "exit_qty": tp1_qty}
