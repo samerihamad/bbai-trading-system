@@ -536,6 +536,7 @@ def run_market_close():
 
 def main():
     global _consecutive_errors, _error_notified
+    global _pre_market_done, _pre_alert_done, _close_done
 
     log("=" * 55)
     log("BBAI Trading System -- Starting")
