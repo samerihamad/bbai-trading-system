@@ -157,7 +157,6 @@ def get_tradable_assets() -> List[Dict[str, Any]]:
                     "easy_to_borrow": a.get("easy_to_borrow", True),
                 })
 
-    all_assets = all_assets[:UNIVERSE_MAX_CANDIDATES]
     print(f"Filtered assets: {len(all_assets)}")
     return all_assets
 
@@ -171,7 +170,7 @@ def get_volume_data(assets: list) -> pd.DataFrame:
     tickers    = [a["symbol"] for a in assets]
     asset_map  = {a["symbol"]: a for a in assets}
     results    = []
-    batch_size = 200  # production optimized
+    batch_size = 1000  # snapshots يدعم حتى 1000+ رمز في طلب واحد
 
     # ── جلب حجم الأمس من Bars API — أكثر موثوقية من IEX prevDailyBar
     print("   📊 جلب حجم الأمس من Bars API...")
