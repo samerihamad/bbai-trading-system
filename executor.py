@@ -424,18 +424,22 @@ def sync_with_alpaca(open_trades: list) -> list:
                 removed.append(trade.ticker)
 
                 # محاولة جلب آخر سعر تنفيذ من Alpaca Orders
-                exit_price  = trade.entry_price
-                exit_reason = "closed_alpaca"
+                exit_price   = trade.entry_price
+                exit_reason  = "closed_alpaca"
+                reject_reason = ""
                 try:
                     ord_r = requests.get(
                         f"{ALPACA_BASE_URL}/v2/orders",
                         headers=HEADERS,
-                        params={"symbols": trade.ticker, "status": "closed", "limit": 5, "direction": "desc"},
+                        params={"symbols": trade.ticker, "status": "closed", "limit": 10, "direction": "desc"},
                         timeout=10,
                     )
                     if ord_r.status_code == 200:
-                        for o in ord_r.json():
-                            if o.get("status") == "filled" and o.get("filled_avg_price"):
+                        orders = ord_r.json()
+                        for o in orders:
+                            status = o.get("status", "")
+                            # ── أمر مُنفَّذ → خذ سعره
+                            if status == "filled" and o.get("filled_avg_price"):
                                 exit_price  = float(o["filled_avg_price"])
                                 otype = o.get("order_class", "")
                                 if "bracket" in otype or o.get("type") in ("stop", "stop_limit"):
@@ -443,8 +447,20 @@ def sync_with_alpaca(open_trades: list) -> list:
                                 elif o.get("type") == "limit":
                                     exit_reason = "tp_alpaca"
                                 break
-                except Exception:
-                    pass
+                            # ── أمر مرفوض → سجّل السبب
+                            elif status in ("rejected", "canceled", "expired"):
+                                reject_reason = (
+                                    f"status={status} | "
+                                    f"type={o.get('type','')} | "
+                                    f"reason={o.get('failed_at') or o.get('canceled_at') or 'unknown'}"
+                                )
+                                break
+                except Exception as e:
+                    print(f"  ⚠️  فشل جلب orders لـ {trade.ticker}: {e}")
+
+                # ── طباعة سبب الرفض إذا وُجد
+                if reject_reason:
+                    print(f"  ❌ {trade.ticker} رُفض من Alpaca: {reject_reason}")
 
                 # حساب PnL
                 qty = getattr(trade, "quantity_remaining", trade.quantity)
