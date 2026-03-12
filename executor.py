@@ -641,6 +641,42 @@ def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: 
     return False
 
 
+def _check_stop_not_at_breakeven(ticker: str, breakeven: float, side: str) -> bool:
+    """
+    يتحقق إذا كان الـ stop الحالي في Alpaca لم يصل للـ breakeven بعد.
+    يُرجع True إذا يحتاج تحديث، False إذا هو بالفعل عند breakeven أو أفضل.
+    """
+    try:
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            params={"status": "open", "symbols": ticker, "limit": 50},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return False  # لا نعرف — لا تتدخل
+        for o in r.json():
+            # فحص standalone stop orders
+            if o.get("type") == "stop":
+                current_stop = float(o.get("stop_price") or 0)
+                if side == "long" and current_stop < breakeven - 0.01:
+                    return True   # الـ stop لا يزال أقل من breakeven
+                if side == "short" and current_stop > breakeven + 0.01:
+                    return True
+            # فحص legs داخل bracket
+            for leg in (o.get("legs") or []):
+                if leg.get("type") == "stop":
+                    current_stop = float(leg.get("stop_price") or 0)
+                    if side == "long" and current_stop < breakeven - 0.01:
+                        return True
+                    if side == "short" and current_stop > breakeven + 0.01:
+                        return True
+        return False  # كل الـ stops عند breakeven أو أفضل
+    except Exception as e:
+        print(f"  ⚠️  _check_stop_not_at_breakeven {ticker}: {e}")
+        return False
+
+
 def sync_trade_state_with_alpaca(trade) -> bool:
     """
     أهم دالة — تُشغَّل قبل كل دورة مراقبة:
@@ -703,6 +739,14 @@ def sync_trade_state_with_alpaca(trade) -> bool:
         if trade.tp1_hit and actual_qty != trade.quantity_remaining:
             trade.quantity_remaining = actual_qty
             _save_open_trades([trade])
+
+        # ── تحقق: إذا tp1_hit لكن الـ stop في Alpaca لم يتحرك بعد للـ breakeven
+        # يحدث لما main.py اكتشف TP1 لكن update_stop_in_alpaca فشلت أو السيرفر restart
+        if trade.tp1_hit and trade.stop_loss == trade.entry_price:
+            stop_needs_update = _check_stop_not_at_breakeven(trade.ticker, trade.entry_price, trade.side)
+            if stop_needs_update:
+                print(f"  🔄 sync: {trade.ticker} tp1_hit لكن stop لم يتحرك في Alpaca — إعادة التحديث")
+                update_stop_in_alpaca(trade.ticker, trade.entry_price, trade.side)
 
         return True
     except Exception as e:
