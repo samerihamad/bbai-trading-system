@@ -553,61 +553,92 @@ def place_market_sell(ticker: str, quantity: int, side: str = "long") -> Optiona
         return None
 
 
-def update_stop_in_alpaca(ticker: str, new_stop: float, side: str) -> bool:
-    """يحدّث وقف الخسارة الحقيقي في Alpaca — يلغي القديم ويضع جديد."""
+def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: int = 2) -> bool:
+    """
+    يحدّث وقف الخسارة الحقيقي في Alpaca — يلغي القديم ويضع جديد.
+    - Retry ×2 مع تأخير 1.5 ثانية بينهما
+    - إشعار Telegram عند الفشل النهائي
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            # ── 1. جلب الأوامر المفتوحة لهذا السهم
+            r = requests.get(
+                f"{ALPACA_BASE_URL}/v2/orders",
+                headers=HEADERS,
+                params={"status": "open", "symbols": ticker, "limit": 50},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"GET orders failed: {r.status_code}")
+
+            # ── 2. حذف كل الـ stop orders المرتبطة (legs + standalone)
+            for o in r.json():
+                legs = o.get("legs") or []
+                for leg in legs:
+                    if leg.get("type") == "stop":
+                        del_r = requests.delete(
+                            f"{ALPACA_BASE_URL}/v2/orders/{leg['id']}",
+                            headers=HEADERS, timeout=10,
+                        )
+                        if del_r.status_code not in (200, 204):
+                            print(f"  ⚠️  فشل حذف stop leg {leg['id']}: {del_r.status_code}")
+                if o.get("type") == "stop":
+                    del_r = requests.delete(
+                        f"{ALPACA_BASE_URL}/v2/orders/{o['id']}",
+                        headers=HEADERS, timeout=10,
+                    )
+                    if del_r.status_code not in (200, 204):
+                        print(f"  ⚠️  فشل حذف stop order {o['id']}: {del_r.status_code}")
+
+            # ── 3. جلب الكمية الفعلية من Alpaca
+            r2 = requests.get(
+                f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
+                headers=HEADERS, timeout=10,
+            )
+            if r2.status_code != 200:
+                raise RuntimeError(f"GET position failed: {r2.status_code}")
+            actual_qty = abs(int(float(r2.json().get("qty", 0))))
+            if actual_qty == 0:
+                print(f"  ℹ️  {ticker}: لا يوجد مركز مفتوح — تخطي تحديث الـ stop")
+                return False
+
+            # ── 4. وضع stop جديد
+            stop_side = "sell" if side == "long" else "buy"
+            order = {
+                "symbol":        ticker,
+                "qty":           str(actual_qty),
+                "side":          stop_side,
+                "type":          "stop",
+                "stop_price":    str(round(new_stop, 2)),
+                "time_in_force": "day",
+            }
+            resp = requests.post(
+                f"{ALPACA_BASE_URL}/v2/orders",
+                headers=HEADERS, json=order, timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                print(f"  ✅ Stop حقيقي في Alpaca: {ticker} @ ${new_stop:.2f} (qty={actual_qty})")
+                return True
+            else:
+                raise RuntimeError(f"POST order failed: {resp.json().get('message', resp.status_code)}")
+
+        except Exception as e:
+            print(f"  ⚠️  update_stop_in_alpaca محاولة {attempt}/{max_retries} — {ticker}: {e}")
+            if attempt < max_retries:
+                time.sleep(1.5)
+
+    # ── فشل نهائي بعد كل المحاولات — إشعار Telegram
+    print(f"  ❌ فشل تحديث Stop في Alpaca نهائياً: {ticker} @ ${new_stop:.2f}")
     try:
-        # جلب الأوامر المفتوحة لهذا السهم
-        r = requests.get(
-            f"{ALPACA_BASE_URL}/v2/orders",
-            headers=HEADERS,
-            params={"status": "open", "symbols": ticker, "limit": 50},
-            timeout=10,
+        from notifier import _send
+        _send(
+            f"⚠️ <b>فشل تحديث Stop — {ticker}</b>\n"
+            f"🕐 تعذّر تحريك الوقف إلى ${new_stop:.2f} بعد {max_retries} محاولات.\n"
+            f"راجع الصفقة يدوياً في Alpaca."
         )
-        if r.status_code != 200:
-            return False
-
-        stop_updated = False
-        for o in r.json():
-            o_type = o.get("order_class", "")
-            # ابحث عن الـ stop order المرتبط بالـ bracket
-            legs = o.get("legs") or []
-            for leg in legs:
-                if leg.get("type") == "stop":
-                    leg_id = leg.get("id", "")
-                    # حذف الـ stop القديم
-                    requests.delete(f"{ALPACA_BASE_URL}/v2/orders/{leg_id}", headers=HEADERS, timeout=10)
-
-            # إذا كان هو نفسه stop order
-            if o.get("type") == "stop":
-                requests.delete(f"{ALPACA_BASE_URL}/v2/orders/{o['id']}", headers=HEADERS, timeout=10)
-
-        # وضع stop جديد بالكمية المتبقية الفعلية
-        r2 = requests.get(f"{ALPACA_BASE_URL}/v2/positions/{ticker}", headers=HEADERS, timeout=10)
-        if r2.status_code != 200:
-            return False
-        actual_qty = abs(int(float(r2.json().get("qty", 0))))
-        if actual_qty == 0:
-            return False
-
-        stop_side = "sell" if side == "long" else "buy"
-        order = {
-            "symbol":        ticker,
-            "qty":           str(actual_qty),
-            "side":          stop_side,
-            "type":          "stop",
-            "stop_price":    str(round(new_stop, 2)),
-            "time_in_force": "day",
-        }
-        resp = requests.post(f"{ALPACA_BASE_URL}/v2/orders", headers=HEADERS, json=order, timeout=15)
-        if resp.status_code in (200, 201):
-            print(f"  ✅ Stop حقيقي في Alpaca: {ticker} @ ${new_stop:.2f}")
-            return True
-        else:
-            print(f"  ⚠️  فشل وضع Stop في Alpaca: {resp.json().get('message','')}")
-            return False
-    except Exception as e:
-        print(f"  ⚠️  update_stop_in_alpaca error {ticker}: {e}")
-        return False
+    except Exception:
+        pass
+    return False
 
 
 def sync_trade_state_with_alpaca(trade) -> bool:
