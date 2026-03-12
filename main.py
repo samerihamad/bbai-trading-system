@@ -96,6 +96,7 @@ _current_day: str = _disk_flags.get("date", "")
 _flags = {
     "pre_market_done": _disk_flags.get("pre_market_done", False),
     "pre_alert_done":  _disk_flags.get("pre_alert_done",  False),
+    "watchlist_sent":  _disk_flags.get("watchlist_sent",  False),  # رسالة قائمة الأسهم
     "close_done":      _disk_flags.get("close_done",      False),
     "daily_trade_num": _disk_flags.get("daily_trade_num", 0),
 }
@@ -167,6 +168,7 @@ def check_new_day():
         _current_day     = today
         _flags["pre_market_done"]  = False
         _flags["pre_alert_done"]   = False
+        _flags["watchlist_sent"]   = False
         _flags["close_done"]       = False
         _flags["daily_trade_num"]  = 0
         # مسح الـ flags القديمة من Sheets
@@ -241,10 +243,10 @@ def run_pre_market():
 
     if daily_stocks:
         try:
-            # نُرسل رسالة Pre-Market فقط إذا لم تُرسل اليوم (تجنب التكرار عند restart)
-            if not _flags["pre_alert_done"]:
+            # نُرسل رسالة Watchlist فقط إذا لم تُرسل اليوم (تجنب التكرار عند restart)
+            if not _flags["watchlist_sent"]:
                 notify_pre_market(list(daily_stocks.keys()))
-                _flags["pre_alert_done"] = True
+                _flags["watchlist_sent"] = True
                 _save_flags_to_disk()
         except Exception as e:
             log(f"Telegram error: {e}")
