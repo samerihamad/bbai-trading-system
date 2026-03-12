@@ -391,6 +391,7 @@ def monitor_open_trades():
                 new_stop = result["new_stop"]
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
                 trade.closing_in_progress = True
+                trade.tp1_hit             = True   # ← فوراً لمنع التكرار في loops القادمة
                 place_market_sell(trade.ticker, tp1_qty, side=side)
                 pnl_tp1 = round(
                     (price - trade.entry_price) * tp1_qty if side == "long"
@@ -410,12 +411,12 @@ def monitor_open_trades():
                         entry_price=trade.entry_price, tp1_price=price,
                         qty_tp1=tp1_qty, profit_tp1=pnl_tp1,
                         r_achieved=r,
-                        qty_remaining=trade.quantity_remaining - tp1_qty,
+                        qty_remaining=trade.quantity_remaining,
                         tp2_price=trade.target_tp2,
                     )
+                    trade.tp1_notified = True
                 except Exception as e:
                     log(f"Telegram error: {e}")
-                trade.tp1_hit              = True
                 trade.tp1_pnl              = pnl_tp1
                 # ── تفعيل Trailing Stop المتقدم
                 trade.trailing_active      = True
