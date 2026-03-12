@@ -31,6 +31,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ─────────────────────────────────────────
 RISK_PER_TRADE     = 0.03    # 3% من الرصيد الحالي لكل صفقة (Compounding)
 MAX_DAILY_LOSSES   = 2       # إيقاف النظام بعد خسارتين في اليوم
+MAX_POSITION_PCT   = 0.40    # 40% حد أقصى لحجم الصفقة الواحدة من الرصيد
 STRATEGY2_LEVERAGE = 2.0     # رافعة مالية × 2
 
 # ─────────────────────────────────────────
