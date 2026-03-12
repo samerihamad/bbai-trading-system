@@ -70,6 +70,9 @@ def notify_trade_open(
     emoji       = "🟩" if "BUY" in side else "🟥"
     side_ar     = "شراء" if "BUY" in side else "بيع على المكشوف"
 
+    # المخاطرة الفعلية = الكمية × المسافة للـ Stop (مش balance × risk_pct)
+    actual_risk = round(abs(price - stop_loss) * quantity, 2)
+
     # استخدام TP2 كـ R ratio إذا متوفر
     main_target = target_tp2 if target_tp2 > 0 else target
     r_ratio     = round(abs(main_target - price) / abs(price - stop_loss), 2) if price != stop_loss else 0
@@ -106,7 +109,7 @@ def notify_trade_open(
         f"💵 Total Value  : ${total_value:,.2f}\n"
         f"🔴 Stop Loss    : ${stop_loss:.2f}\n"
         f"{tp_en}"
-        f"⚠️  Risk         : ${risk_amount:.2f}\n"
+        f"⚠️  Risk         : ${actual_risk:.2f}\n"
         "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🇦🇪 <b>العربية</b>\n"
         f"{trade_num_ar}"
@@ -117,7 +120,7 @@ def notify_trade_open(
         f"💵 إجمالي المبلغ : ${total_value:,.2f}\n"
         f"🔴 وقف الخسارة   : ${stop_loss:.2f}\n"
         f"{tp_ar}"
-        f"⚠️  المخاطرة      : ${risk_amount:.2f}"
+        f"⚠️  المخاطرة      : ${actual_risk:.2f}"
     )
     return _send(msg)
 
