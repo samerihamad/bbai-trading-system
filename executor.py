@@ -306,19 +306,26 @@ def _load_open_trades_from_sheets() -> list:
                   f" | TP2=${float(d['target_tp2']):.2f}")
         print(f"✅ تم استعادة {len(trades)} صفقة من Google Sheets")
 
-        # ── تحقق فوري من الكمية الفعلية في Alpaca لتصحيح أي تضاعف
+        # ── تحقق فوري من الكمية الفعلية في Alpaca لتصحيح أي تضاعف أو صفقات وهمية
         try:
             pos_r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
             if pos_r.status_code == 200:
                 alpaca_pos = {p["symbol"]: abs(int(float(p.get("qty", 0)))) for p in pos_r.json()}
+                valid_trades = []
                 for trade in trades:
                     alpaca_qty = alpaca_pos.get(trade.ticker, 0)
-                    if alpaca_qty > 0 and alpaca_qty != trade.quantity and not trade.tp1_hit:
-                        # الكمية في Alpaca هي المرجع الحقيقي
+                    if alpaca_qty == 0:
+                        # ── الصفقة غير موجودة في Alpaca — صفقة وهمية، لا نستعيدها
+                        print(f"  🗑️  تجاهل {trade.ticker}: qty=0 في Alpaca (صفقة وهمية)")
+                        continue
+                    if alpaca_qty != trade.quantity and not trade.tp1_hit:
+                        # ── تصحيح الكمية
                         half = max(1, alpaca_qty // 2)
                         print(f"  🔧 تصحيح {trade.ticker}: Sheets={trade.quantity} → Alpaca={alpaca_qty}")
                         trade.quantity           = alpaca_qty
                         trade.quantity_remaining = alpaca_qty - half
+                    valid_trades.append(trade)
+                trades = valid_trades
         except Exception as e:
             print(f"  ⚠️  فشل تحقق الكمية من Alpaca: {e}")
 
@@ -537,6 +544,9 @@ def sync_with_alpaca(open_trades: list) -> list:
                         trade.quantity           = system_qty
                         trade.quantity_remaining = alpaca_qty
                         trade.tp1_hit            = True
+                        # ── لا نُرسل إشعار هنا إذا monitor_open_trades أرسله بالفعل
+                        if not getattr(trade, "tp1_notified", False):
+                            print(f"  ℹ️  {trade.ticker}: TP1 اكتُشف عبر Sync (monitor لم يُعالجه بعد)")
                         _qty_warned.discard(trade.ticker)
                     elif alpaca_qty > system_qty and trade.ticker not in _qty_warned:
                         # Alpaca أكثر — نُصحح بالقيمة الفعلية فقط إذا الفرق كبير (> 5%)
@@ -611,6 +621,7 @@ class OpenTrade:
     risk_amount:         float
     opened_at:           datetime  = None
     closing_in_progress: bool      = False  # علامة: النظام يعالج الإغلاق — sync يتجاهلها
+    tp1_notified:        bool      = False  # منع إرسال إشعار TP1 مرتين
     tp1_pnl:             float     = 0.0    # ربح TP1 المحقق — يُستخدم لحساب total_pnl عند الإغلاق النهائي
     # ── حقول Trailing Stop المتقدمة
     trailing_active:     bool      = False  # يُفعَّل عند TP1
@@ -979,6 +990,12 @@ def update_stop_loss_alpaca(trade: "OpenTrade", new_stop: float) -> bool:
     ticker = trade.ticker
     side   = trade.side
     qty    = trade.quantity_remaining
+
+    # ── تحقق من وجود الصفقة فعلاً في Alpaca قبل أي عملية
+    available = get_position_qty_available(ticker)
+    if available == 0:
+        print(f"  ⚠️  {ticker}: qty=0 في Alpaca — تخطي تحديث Stop")
+        return False
 
     try:
         # ── جلب كل الأوامر المعلقة للسهم
