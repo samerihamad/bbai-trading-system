@@ -29,23 +29,64 @@ def _now() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z")
 
 
-def notify_pre_market(stocks: list) -> bool:
-    stocks_str = " | ".join(stocks[:20]) if stocks else "None"
+def notify_pre_market(stocks: dict) -> bool:
+    """
+    stocks: dict من get_daily_universe — {symbol: {change_pct, intraday_range, vol_spike, ...}}
+    """
+    symbols = list(stocks.keys())
+    total   = len(symbols)
+
+    # أعلى 10 حركةً
+    top10 = sorted(
+        stocks.items(),
+        key=lambda x: x[1].get("volatility_score", 0),
+        reverse=True
+    )[:10]
+
+    top10_lines = "\n".join(
+        f"  {sym:<6} | Δ={info['change_pct']:.1%} | Range={info['intraday_range']:.1%} | Vol={info['vol_spike']:.1f}x"
+        for sym, info in top10
+    )
+
     msg = (
-        "🌅 <b>Pre-Market Alert | تنبيه ما قبل الافتتاح</b>\n"
+        "🌅 <b>Pre-Market Watchlist</b>\n"
         f"🕐 {_now()}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🇬🇧 <b>English</b>\n"
-        f"📋 Watchlist ({len(stocks)} stocks):\n"
-        f"<code>{stocks_str}</code>\n"
-        "⏳ Market opens at 09:30 EST\n"
-        "\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🇦🇪 <b>العربية</b>\n"
-        f"📋 قائمة المراقبة ({len(stocks)} سهم):\n"
-        f"<code>{stocks_str}</code>\n"
-        "⏳ السوق يفتح الساعة 09:30 EST"
+        f"📋 <b>{total} stocks selected</b>\n\n"
+        f"🔥 <b>Top 10 Movers:</b>\n"
+        f"<code>{top10_lines}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⏳ Market opens at 09:30 EST"
     )
     return _send(msg)
+
+
+def notify_universe_refresh(stocks: dict) -> bool:
+    """إشعار التحديث الساعي للقائمة"""
+    symbols = list(stocks.keys())
+    total   = len(symbols)
+
+    top10 = sorted(
+        stocks.items(),
+        key=lambda x: x[1].get("volatility_score", 0),
+        reverse=True
+    )[:10]
+
+    top10_lines = "\n".join(
+        f"  {sym:<6} | Δ={info['change_pct']:.1%} | Range={info['intraday_range']:.1%} | Vol={info['vol_spike']:.1f}x"
+        for sym, info in top10
+    )
+
+    msg = (
+        "🔄 <b>Hourly Watchlist Update</b>\n"
+        f"🕐 {_now()}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 <b>{total} stocks monitored</b>\n\n"
+        f"🔥 <b>Top 10 Movers:</b>\n"
+        f"<code>{top10_lines}</code>"
+    )
+    return _send(msg)
+
 
 
 def notify_no_opportunity() -> bool:
