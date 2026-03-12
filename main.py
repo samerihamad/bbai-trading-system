@@ -28,6 +28,8 @@ from executor         import (
     get_current_price,
     get_open_positions,
     sync_with_alpaca,
+    sync_trade_state_with_alpaca,
+    update_stop_in_alpaca,
     open_meanrev_trade,
     monitor_trade,
     place_market_sell,
@@ -254,6 +256,13 @@ def monitor_open_trades():
 
     for trade in open_trades:
         try:
+            # ── تزامن مع Alpaca أولاً (يكتشف TP1 تلقائي + يحدث الكمية)
+            still_open = sync_trade_state_with_alpaca(trade)
+            if not still_open:
+                log(f"  ℹ️  {trade.ticker}: مغلقة في Alpaca — إزالة")
+                trades_to_remove.append(trade)
+                continue
+
             result = monitor_trade(trade)
             status = result["status"]
             price  = result["price"]
@@ -368,7 +377,8 @@ def monitor_open_trades():
                 except Exception as e:
                     log(f"Telegram error: {e}")
                 trade.stop_loss = new_stop
-                _save_open_trades(open_trades)  # حفظ بعد تحديث الـ trailing
+                update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحديث حقيقي في Alpaca
+                _save_open_trades(open_trades)
 
             else:
                 tp_info = (
