@@ -321,8 +321,28 @@ def monitor_open_trades():
                 order_id = place_market_sell(trade.ticker, tp1_qty, side=side)
 
                 if order_id == "ALREADY_CLOSED":
-                    # الصفقة مغلقة بالكامل في Alpaca — أزلها
-                    log(f"  ℹ️  {trade.ticker}: مغلقة بالكامل في Alpaca — إزالة من المراقبة")
+                    # الصفقة مغلقة بالكامل في Alpaca — نسجّل ونُشعر قبل الإزالة
+                    log(f"  ℹ️  {trade.ticker}: مغلقة بالكامل في Alpaca — تسجيل وإزالة")
+                    pnl_full = round(
+                        (price - trade.entry_price) * trade.quantity if side == "long"
+                        else (trade.entry_price - price) * trade.quantity, 2
+                    )
+                    record_trade(
+                        ticker=trade.ticker, strategy=trade.strategy,
+                        entry_price=trade.entry_price, exit_price=price,
+                        quantity=trade.quantity, stop_loss=trade.stop_loss,
+                        target=trade.target_tp2, risk_amount=trade.risk_amount,
+                        exit_reason="closed_in_alpaca", opened_at=trade.opened_at, side=side,
+                    )
+                    risk_manager.record_win(pnl_full, r)
+                    try:
+                        notify_trade_win(
+                            ticker=trade.ticker, entry_price=trade.entry_price,
+                            exit_price=price, quantity=trade.quantity,
+                            profit=pnl_full, r_achieved=r,
+                        )
+                    except Exception as e:
+                        log(f"Telegram error: {e}")
                     trades_to_remove.append(trade)
                 elif order_id:
                     pnl_tp1 = round(
