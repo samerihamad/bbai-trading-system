@@ -205,7 +205,7 @@ def run_pre_market():
 
     if daily_stocks:
         try:
-            notify_pre_market(list(daily_stocks.keys()))
+            notify_pre_market(daily_stocks)
         except Exception as e:
             log(f"Telegram error: {e}")
         log(f"Universe ready: {len(daily_stocks)} stocks selected")
