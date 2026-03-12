@@ -105,7 +105,11 @@ def record_trade(
         pnl        = round((entry_price - exit_price) * quantity, 2)
         r_achieved = round((entry_price - exit_price) / abs(entry_price - stop_loss), 2) if stop_loss != entry_price else 0.0
 
-    outcome = "win" if pnl > 0 else "loss"
+    # stopped_after_tp1 = وقف بعد TP1 عند التعادل — ليست خسارة حقيقية
+    if exit_reason == "stopped_after_tp1":
+        outcome = "breakeven"
+    else:
+        outcome = "win" if pnl > 0 else "loss"
 
     record = TradeRecord(
         ticker=ticker,
@@ -135,21 +139,23 @@ def record_trade(
 def calculate_daily_stats(trades: list[dict]) -> dict:
     if not trades:
         return {
-            "total_trades": 0, "wins": 0, "losses": 0,
+            "total_trades": 0, "wins": 0, "losses": 0, "breakevens": 0,
             "win_rate": 0.0,   "total_pnl": 0.0, "total_r": 0.0,
             "avg_win": 0.0,    "avg_loss": 0.0,
             "best_trade": 0.0, "worst_trade": 0.0,
             "long_trades": 0,  "short_trades": 0,
         }
 
-    wins   = [t for t in trades if t["outcome"] == "win"]
-    losses = [t for t in trades if t["outcome"] == "loss"]
-    pnls   = [t["pnl"] for t in trades]
+    wins       = [t for t in trades if t["outcome"] == "win"]
+    losses     = [t for t in trades if t["outcome"] == "loss"]
+    breakevens = [t for t in trades if t["outcome"] == "breakeven"]
+    pnls       = [t["pnl"] for t in trades]
 
     return {
         "total_trades":  len(trades),
         "wins":          len(wins),
         "losses":        len(losses),
+        "breakevens":    len(breakevens),
         "win_rate":      round(len(wins) / len(trades) * 100, 1),
         "total_pnl":     round(sum(pnls), 2),
         "total_r":       round(sum(t["r_achieved"] for t in trades), 2),
@@ -168,7 +174,7 @@ def calculate_daily_stats(trades: list[dict]) -> dict:
 
 DAILY_SUMMARY_SHEET  = "Daily Summary"
 DAILY_SUMMARY_HEADERS = [
-    "date", "total_trades", "wins", "losses", "win_rate",
+    "date", "total_trades", "wins", "losses", "breakevens", "win_rate",
     "long_trades", "short_trades",
     "total_r", "total_pnl",
     "best_trade", "worst_trade", "avg_win", "avg_loss",
@@ -201,6 +207,7 @@ def _save_daily_summary_sheets(stats: dict, balance: float, today: str) -> None:
                 ws.update(f"A{idx}:{chr(65 + len(DAILY_SUMMARY_HEADERS) - 1)}{idx}", [[
                     today,
                     stats["total_trades"], stats["wins"], stats["losses"],
+                    stats.get("breakevens", 0),
                     stats["win_rate"], stats["long_trades"], stats["short_trades"],
                     stats["total_r"], stats["total_pnl"],
                     stats["best_trade"], stats["worst_trade"],
@@ -214,6 +221,7 @@ def _save_daily_summary_sheets(stats: dict, balance: float, today: str) -> None:
         ws.append_row([
             today,
             stats["total_trades"], stats["wins"], stats["losses"],
+            stats.get("breakevens", 0),
             stats["win_rate"], stats["long_trades"], stats["short_trades"],
             stats["total_r"], stats["total_pnl"],
             stats["best_trade"], stats["worst_trade"],
@@ -254,6 +262,7 @@ def send_daily_report(balance: float, open_trades: list = None) -> bool:
         avg_win=stats["avg_win"],
         avg_loss=stats["avg_loss"],
         open_trades=open_trades or [],
+        breakevens=stats.get("breakevens", 0),
     )
 
     # ── حفظ الملخص اليومي في Google Sheets
