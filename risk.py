@@ -5,10 +5,10 @@
 from config import (
     RISK_PER_TRADE,
     MAX_DAILY_LOSSES,
+    MAX_POSITION_PCT,
     STRATEGY2_LEVERAGE,
     PROFIT_FACTOR_CUT,
 )
-
 
 # ─────────────────────────────────────────
 # 1. حساب حجم الصفقة
@@ -58,9 +58,22 @@ def calculate_position_size(
     # ── فحص buying_power: تأكد أن التكلفة لا تتجاوز ما هو متاح
     if buying_power > 0:
         max_affordable = int(buying_power * 0.95 / entry_price)  # 95% للأمان
-        if quantity > max_affordable:
+        if max_affordable < 2:
+            print(f"⛔ buying_power=${buying_power:,.0f} لا يكفي لفتح صفقة (max={max_affordable} سهم < 2)")
+            quantity = 0
+        elif quantity > max_affordable:
             print(f"⚠️  تقليل الكمية من {quantity} إلى {max_affordable} (buying_power=${buying_power:,.0f})")
-            quantity = max(1, max_affordable)
+            quantity = max_affordable
+
+    # ── حد أقصى لحجم الصفقة = MAX_POSITION_PCT من الرصيد
+    # يمنع الصفقات الكبيرة جداً عند الـ stop الضيق جداً
+    if entry_price > 0 and balance > 0 and quantity > 0:
+        max_by_position = int(balance * MAX_POSITION_PCT / entry_price)
+        if max_by_position < 2:
+            max_by_position = 2
+        if quantity > max_by_position:
+            print(f"⚠️  تحديد الكمية بـ {max_by_position} (حد {MAX_POSITION_PCT*100:.0f}% من الرصيد=${balance*MAX_POSITION_PCT:,.0f}) بدلاً من {quantity}")
+            quantity = max_by_position
 
     return {
         "quantity":    quantity,
