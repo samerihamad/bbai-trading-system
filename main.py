@@ -19,6 +19,8 @@ from config import (
     MARKET_CLOSE,
     NO_OPPORTUNITY_INTERVAL,
     MAX_TOTAL,
+    MAX_LONG,
+    MAX_SHORT,
 )
 from universe         import get_daily_universe
 from selector         import run_selector
@@ -591,14 +593,33 @@ def scan_for_signals():
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
 
+        # ── حساب عدد الصفقات المفتوحة حالياً لكل اتجاه
+        n_long  = sum(1 for t in open_trades if t.side == "long")
+        n_short = sum(1 for t in open_trades if t.side == "short")
+
         for signal in results.get("meanrev", []):
             if not risk_manager.can_trade():
                 break
+            if len(open_trades) >= MAX_TOTAL:
+                break
+
+            # ── تحقق من حد Long/Short قبل الفتح
+            if signal.side == "long" and n_long >= MAX_LONG:
+                print(f"  ⛔ {signal.ticker} LONG رُفض — الحد الأقصى للـ LONG ({MAX_LONG}) وصل")
+                continue
+            if signal.side == "short" and n_short >= MAX_SHORT:
+                print(f"  ⛔ {signal.ticker} SHORT رُفض — الحد الأقصى للـ SHORT ({MAX_SHORT}) وصل")
+                continue
             # تحديد الاستراتيجية من الـ reason
             strategy = "momentum" if "MOM" in signal.reason else "meanrev"
             trade = open_meanrev_trade(signal, balance, strategy=strategy)
             if trade:
                 open_trades.append(trade)
+                # ── تحديث عدادات Long/Short فوراً
+                if signal.side == "long":
+                    n_long += 1
+                else:
+                    n_short += 1
                 _save_open_trades(open_trades)
                 found_signal = True
                 _flags["daily_trade_num"] += 1
