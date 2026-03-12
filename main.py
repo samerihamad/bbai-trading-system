@@ -53,6 +53,7 @@ from notifier         import (
     notify_tp1_hit,
     notify_tp2_hit,
     notify_trade_closed,
+    notify_universe_refresh,
 )
 from telegram_commands import (
     system_state,
@@ -246,7 +247,7 @@ def run_pre_market():
         try:
             # نُرسل رسالة Watchlist فقط إذا لم تُرسل اليوم (تجنب التكرار عند restart)
             if not _flags["watchlist_sent"]:
-                notify_pre_market(list(daily_stocks.keys()))
+                notify_pre_market(daily_stocks)
                 _flags["watchlist_sent"] = True
                 _save_flags_to_disk()
         except Exception as e:
@@ -526,6 +527,10 @@ def refresh_universe_if_needed():
             refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
             last_universe_refresh = now
             log(f"✅ تم تحديث القائمة: {len(daily_stocks)} سهم")
+            try:
+                notify_universe_refresh(daily_stocks)
+            except Exception as e:
+                log(f"Telegram error (refresh): {e}")
         else:
             log("⚠️ فشل تحديث القائمة — نبقى على القائمة الحالية")
     except Exception as e:
