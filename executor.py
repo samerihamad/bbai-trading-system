@@ -1103,7 +1103,8 @@ def open_meanrev_trade(
     print(f"   TP1 ({tp1_qty} سهم) : ${signal.target_tp1:.2f} (1R)")
     print(f"   TP2 ({tp2_qty} سهم) : ${signal.target_tp2:.2f} (3R)")
     print(f"   وقف الخسارة   : ${signal.stop_loss:.2f}")
-    print(f"   المخاطرة       : ${sizing['risk_amount']} | رافعة ×{sizing['leverage']}")
+    actual_risk_log = round(abs(signal.entry_price - signal.stop_loss) * total_qty, 2)
+    print(f"   المخاطرة الفعلية: ${actual_risk_log} | رافعة ×{sizing['leverage']}")
 
     # ── أمر 1: tp1_qty مع هدف TP1
     order_id_1 = place_bracket_order(
@@ -1153,31 +1154,50 @@ def open_meanrev_trade(
     print(f"   ✅ أمر TP1: {order_id_1[:8] if order_id_1 else 'N/A'}...")
     print(f"   ✅ أمر TP2: {order_id_2[:8] if order_id_2 else 'فشل'}...")
 
-    # ── تحقق من الكمية الفعلية المُنفَّذة عبر الأمر نفسه (وليس positions)
-    # positions يجمع الكميات القديمة + الجديدة — الأمر أدق
-    actual_total = total_qty  # افتراضي
-    for attempt in range(3):
+    # ── تحقق من الكمية الفعلية المُنفَّذة من كلا الأمرين
+    actual_tp1_filled = 0
+    actual_tp2_filled = 0
+
+    for attempt in range(4):
         time.sleep(2)
         try:
-            ord_r = requests.get(
-                f"{ALPACA_BASE_URL}/v2/orders/{order_id_1}",
-                headers=HEADERS, timeout=10,
-            )
-            if ord_r.status_code == 200:
-                od = ord_r.json()
-                filled = int(float(od.get("filled_qty", 0) or 0))
-                if filled > 0:
-                    actual_total = filled
-                    break
-                status_o = od.get("status", "")
-                if status_o in ("accepted", "pending_new", "new"):
-                    continue  # لم يُنفَّذ بعد
+            # تحقق من أمر TP1
+            if actual_tp1_filled == 0:
+                r1 = requests.get(f"{ALPACA_BASE_URL}/v2/orders/{order_id_1}", headers=HEADERS, timeout=10)
+                if r1.status_code == 200:
+                    d1 = r1.json()
+                    f1 = int(float(d1.get("filled_qty", 0) or 0))
+                    if f1 > 0:
+                        actual_tp1_filled = f1
+
+            # تحقق من أمر TP2
+            if actual_tp2_filled == 0 and order_id_2:
+                r2 = requests.get(f"{ALPACA_BASE_URL}/v2/orders/{order_id_2}", headers=HEADERS, timeout=10)
+                if r2.status_code == 200:
+                    d2 = r2.json()
+                    f2 = int(float(d2.get("filled_qty", 0) or 0))
+                    status2 = d2.get("status", "")
+                    if f2 > 0:
+                        actual_tp2_filled = f2
+                    elif status2 in ("canceled", "rejected", "expired"):
+                        print(f"   ⚠️  أمر TP2 {status2} — الكمية: 0")
+                        actual_tp2_filled = -1  # علامة رُفض
+
+            if actual_tp1_filled > 0 and actual_tp2_filled != 0:
+                break
         except Exception:
             pass
 
-    # توزيع الكمية الفعلية بين TP1 وTP2 بنسبة 50/50
-    actual_tp1_qty = max(1, actual_total // 2)
-    actual_tp2_qty = actual_total - actual_tp1_qty
+    # حساب الكمية الكلية الفعلية
+    tp2_actual = max(0, actual_tp2_filled) if actual_tp2_filled > 0 else 0
+    actual_total = actual_tp1_filled + tp2_actual
+
+    if actual_total == 0:
+        actual_total = total_qty  # fallback إذا فشل التحقق
+
+    # توزيع نهائي
+    actual_tp1_qty = actual_tp1_filled if actual_tp1_filled > 0 else max(1, actual_total // 2)
+    actual_tp2_qty = tp2_actual if tp2_actual > 0 else (actual_total - actual_tp1_qty)
 
     if actual_total != total_qty:
         print(f"   ℹ️  كمية فعلية من Alpaca: {actual_total} (طُلب: {total_qty}) — tp1={actual_tp1_qty} tp2={actual_tp2_qty}")
