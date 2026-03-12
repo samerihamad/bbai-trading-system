@@ -464,6 +464,7 @@ def notify_daily_report(
     avg_win: float = 0.0,
     avg_loss: float = 0.0,
     open_trades: list = None,
+    breakevens: int = 0,
 ) -> bool:
 
     win_rate    = (wins / total_trades * 100) if total_trades > 0 else 0
@@ -472,6 +473,8 @@ def notify_daily_report(
     r_emoji     = "✅" if total_r >= 0 else "❌"
     r_sign      = "+" if total_r >= 0 else ""
     wrate_emoji = "🟢" if win_rate >= 50 else "🔴"
+    be_line_en  = f"⚖️ Breakeven : {breakevens}\n" if breakevens > 0 else ""
+    be_line_ar  = f"⚖️ تعادل     : {breakevens}\n" if breakevens > 0 else ""
 
     msg = (
         f"📊 <b>Daily Report | التقرير اليومي</b>\n"
@@ -480,6 +483,7 @@ def notify_daily_report(
         "🇬🇧 <b>English</b>\n\n"
         f"🔢 Total Trades : <b>{total_trades}</b>\n"
         f"🟢 Wins : {wins}   🔴 Losses : {losses}\n"
+        f"{be_line_en}"
         f"{wrate_emoji} Win Rate : {win_rate:.1f}%\n"
         f"📊 Long : {long_trades}   |   Short : {short_trades}\n"
         f"{r_emoji} Total R : {r_sign}{total_r:.2f}R\n"
@@ -507,6 +511,7 @@ def notify_daily_report(
         "🇦🇪 <b>العربية</b>\n\n"
         f"🔢 إجمالي الصفقات : <b>{total_trades}</b>\n"
         f"🟢 أرباح : {wins}   🔴 خسائر : {losses}\n"
+        f"{be_line_ar}"
         f"{wrate_emoji} نسبة الفوز : {win_rate:.1f}%\n"
         f"📊 شراء : {long_trades}   |   مكشوف : {short_trades}\n"
         f"{r_emoji} إجمالي R : {r_sign}{total_r:.2f}R\n"
