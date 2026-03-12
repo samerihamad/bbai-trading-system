@@ -72,6 +72,7 @@ class MeanRevSignal:
     liquidity_sweep: bool  = False
     score:           float = 0.0    # درجة قوة الإشارة — يُعيَّن في selector.py
     timeframe:       str   = "1Day" # التايم فريم الذي جاءت منه الإشارة
+    strategy:        str   = "meanrev"  # "meanrev" أو "momentum"
 
 # ─────────────────────────────────────────
 # 1. جلب البيانات وحساب المؤشرات
