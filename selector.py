@@ -99,14 +99,14 @@ def score_signal(sig: MeanRevSignal) -> float:
             score += 10
 
     # تايم فريم — الأولوية لـ 1Day
-    if "[1Day]" in sig.reason:
+    if sig.timeframe == "1Day":
         score += 10
-    elif "[1Hour]" in sig.reason:
+    elif sig.timeframe == "1Hour":
         score += 5
     # 15Min = 0 (الأكثر ضوضاء)
 
     # ADX مناسب لـ MeanRev (15-30)
-    if "MOM" not in sig.reason and 15 <= sig.adx <= 30:
+    if sig.strategy == "meanrev" and 15 <= sig.adx <= 30:
         score += 5
 
     # R/R ratio
@@ -235,7 +235,7 @@ def apply_position_limits(
         if open_total + len(selected) >= MAX_TOTAL:
             break
 
-        is_momentum = "MOM" in sig.reason
+        is_momentum = sig.strategy == "momentum"
 
         if sig.side == "long":
             if is_momentum:
@@ -343,6 +343,8 @@ def run_selector(
                 ema200=ema200,
                 signal_quality=mom_raw.signal_quality,
                 liquidity_sweep=False,
+                strategy="momentum",   # ← تمييز صريح
+                timeframe="15Min",     # ← Momentum دائماً 15 دقيقة
             )
             candidates.append(mom_unified)
 
@@ -355,7 +357,7 @@ def run_selector(
             # استراتيجية واحدة أعطت إشارة
             best = candidates[0]
             sc       = score_signal(best)
-            tag      = "MOM" if "MOM" in best.reason else "REV"
+            tag      = "MOM" if best.strategy == "momentum" else "REV"
             side_tag = "🟢 LONG" if best.side == "long" else "🔴 SHORT"
             print(f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}")
             if sc >= MIN_SCORE:
@@ -368,8 +370,8 @@ def run_selector(
             rejected  = [c for c in candidates if c is not best][0]
             sc        = score_signal(best)
             sc_rej    = score_signal(rejected)
-            tag       = "MOM" if "MOM" in best.reason else "REV"
-            rej_tag   = "MOM" if "MOM" in rejected.reason else "REV"
+            tag       = "MOM" if best.strategy == "momentum" else "REV"
+            rej_tag   = "MOM" if rejected.strategy == "momentum" else "REV"
             side_tag  = "🟢 LONG" if best.side == "long" else "🔴 SHORT"
             print(
                 f" | [{tag}] {side_tag} ✅ Score={sc:.0f} | RSI={best.rsi:.1f} | entry=${best.entry_price:.2f} | TP2=${best.target_tp2:.2f}"
