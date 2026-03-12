@@ -355,6 +355,7 @@ def monitor_open_trades():
                     trade.tp1_hit            = True
                     trade.stop_loss          = new_stop
                     trade.quantity_remaining = trade.quantity - tp1_qty  # تحديث الكمية المتبقية
+                    update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحريك الـ SL في Alpaca فوراً
                     _save_open_trades(open_trades)  # حفظ فوري بعد TP1
                 else:
                     log(f"  ⚠️  فشل TP1 لـ {trade.ticker} — سيُعاد المحاولة في الدورة القادمة")
