@@ -305,6 +305,23 @@ def _load_open_trades_from_sheets() -> list:
                   f" | TP1=${float(d['target_tp1']):.2f}"
                   f" | TP2=${float(d['target_tp2']):.2f}")
         print(f"✅ تم استعادة {len(trades)} صفقة من Google Sheets")
+
+        # ── تحقق فوري من الكمية الفعلية في Alpaca لتصحيح أي تضاعف
+        try:
+            pos_r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+            if pos_r.status_code == 200:
+                alpaca_pos = {p["symbol"]: abs(int(float(p.get("qty", 0)))) for p in pos_r.json()}
+                for trade in trades:
+                    alpaca_qty = alpaca_pos.get(trade.ticker, 0)
+                    if alpaca_qty > 0 and alpaca_qty != trade.quantity and not trade.tp1_hit:
+                        # الكمية في Alpaca هي المرجع الحقيقي
+                        half = max(1, alpaca_qty // 2)
+                        print(f"  🔧 تصحيح {trade.ticker}: Sheets={trade.quantity} → Alpaca={alpaca_qty}")
+                        trade.quantity           = alpaca_qty
+                        trade.quantity_remaining = alpaca_qty - half
+        except Exception as e:
+            print(f"  ⚠️  فشل تحقق الكمية من Alpaca: {e}")
+
         return trades
     except Exception as e:
         print(f"❌ خطأ في قراءة Open Trades: {e}")
@@ -497,21 +514,22 @@ def sync_with_alpaca(open_trades: list) -> list:
 
                 if alpaca_qty != system_qty and not trade.tp1_hit:
                     if alpaca_qty < system_qty:
-                        # TP1 نُفِّذ جزئياً — الكمية المتبقية هي ما في Alpaca
+                        # الفرق = TP1 نُفِّذ بواسطة Alpaca
                         diff = system_qty - alpaca_qty
                         print(f"  🔄 {trade.ticker}: Alpaca={alpaca_qty} < النظام={system_qty} (diff={diff}) → TP1 جزئي")
                         trade.quantity           = system_qty
                         trade.quantity_remaining = alpaca_qty
                         trade.tp1_hit            = True
                         _qty_warned.discard(trade.ticker)
-                    elif alpaca_qty > system_qty:
-                        # Alpaca عنده أكثر — نُحدّث النظام بالقيمة الفعلية (مرة واحدة فقط)
-                        if trade.ticker not in _qty_warned:
+                    elif alpaca_qty > system_qty and trade.ticker not in _qty_warned:
+                        # Alpaca أكثر — نُصحح بالقيمة الفعلية فقط إذا الفرق كبير (> 5%)
+                        pct_diff = (alpaca_qty - system_qty) / system_qty
+                        if pct_diff > 0.05:
                             _qty_warned.add(trade.ticker)
-                            half = alpaca_qty // 2
+                            half = max(1, alpaca_qty // 2)
+                            print(f"  🔄 {trade.ticker}: تصحيح الكمية → {alpaca_qty} (tp1={half}, tp2={alpaca_qty-half})")
                             trade.quantity           = alpaca_qty
                             trade.quantity_remaining = alpaca_qty - half
-                            print(f"  🔄 {trade.ticker}: تصحيح الكمية → {alpaca_qty} (tp1={half}, tp2={alpaca_qty-half})")
 
         if removed:
             for t in removed:
