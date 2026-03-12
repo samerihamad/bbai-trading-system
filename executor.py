@@ -613,11 +613,12 @@ def get_account() -> dict:
         data = response.json()
 
         return {
-            "balance":        float(data.get("equity", 0)),
-            "buying_power":   float(data.get("buying_power", 0)),
-            "cash":           float(data.get("cash", 0)),
-            "shorting_enabled": data.get("shorting_enabled", False),
-            "status":         data.get("status", "unknown"),
+            "balance":               float(data.get("equity", 0)),
+            "buying_power":          float(data.get("buying_power", 0)),
+            "daytrade_buying_power": float(data.get("daytrading_buying_power", 0)),
+            "cash":                  float(data.get("cash", 0)),
+            "shorting_enabled":      data.get("shorting_enabled", False),
+            "status":                data.get("status", "unknown"),
         }
 
     except Exception as e:
@@ -1027,7 +1028,13 @@ def open_meanrev_trade(
     """
     account      = get_account()
     balance      = account.get("balance", balance) if account else balance
-    buying_power = account.get("buying_power", 0) if account else 0
+    buying_power          = account.get("buying_power", 0) if account else 0
+    daytrade_buying_power = account.get("daytrade_buying_power", 0) if account else 0
+
+    # ── استخدم القيمة الأصغر — تجنب PDT rejection
+    # daytrade_buying_power = 0 في Cash Accounts (لا PDT) → نستخدم buying_power عادي
+    effective_buying_power = min(buying_power, daytrade_buying_power) \
+        if daytrade_buying_power > 0 else buying_power
 
     # ── فحص حرج: هل السهم مفتوح مسبقاً في Alpaca؟
     # نتحقق مباشرةً من Alpaca لا من open_trades لأن open_trades قد تكون قديمة
@@ -1072,7 +1079,7 @@ def open_meanrev_trade(
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         use_leverage=True,
-        buying_power=buying_power,
+        buying_power=effective_buying_power,
         risk_override=risk_pct,
     )
 
