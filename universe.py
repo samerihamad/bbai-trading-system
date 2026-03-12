@@ -170,12 +170,7 @@ def get_volume_data(assets: list) -> pd.DataFrame:
     tickers    = [a["symbol"] for a in assets]
     asset_map  = {a["symbol"]: a for a in assets}
     results    = []
-    batch_size = 1000  # snapshots يدعم حتى 1000+ رمز في طلب واحد
-
-    # ── جلب حجم الأمس من Bars API — أكثر موثوقية من IEX prevDailyBar
-    print("   📊 جلب حجم الأمس من Bars API...")
-    prev_vol_map = get_prev_volume_batch(tickers)
-    print(f"   ✅ حجم الأمس متوفر لـ {len(prev_vol_map):,} سهم")
+    batch_size = 1000  # snapshots يدعم حتى 1000 رمز في طلب واحد
 
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
@@ -209,9 +204,7 @@ def get_volume_data(assets: list) -> pd.DataFrame:
                 )
 
                 daily_vol = float(daily.get("v") or 0)
-
-                # ── Bars API كمرجع للسيولة — أكثر موثوقية من IEX prevDailyBar
-                prev_vol  = prev_vol_map.get(symbol, float(prev.get("v") or 0))
+                prev_vol  = float(prev.get("v") or 0)
                 volume    = prev_vol if prev_vol > 0 else daily_vol
 
                 if not last_price or not volume:
@@ -282,53 +275,6 @@ def get_volume_data(assets: list) -> pd.DataFrame:
 # ─────────────────────────────────────────
 # 4. EMA200 Batch Calculation
 # ─────────────────────────────────────────
-
-def get_prev_volume_batch(tickers: list) -> dict:
-    """
-    يجلب حجم تداول أمس من Bars API — أكثر موثوقية من prevDailyBar في IEX snapshots.
-    يُرجع dict: {symbol: prev_volume}
-    """
-    from datetime import datetime, timedelta
-    end   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    vol_map    = {}
-    batch_size = 200
-
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i + batch_size]
-        response = _safe_get(
-            f"{ALPACA_DATA_URL}/v2/stocks/bars",
-            {
-                "symbols":    ",".join(batch),
-                "timeframe":  "1Day",
-                "start":      start,
-                "end":        end,
-                "limit":      3,
-                "feed":       "iex",
-                "adjustment": "raw",
-            },
-        )
-        if not response:
-            continue
-        try:
-            data = response.json().get("bars", {})
-        except Exception:
-            continue
-
-        for symbol, bars in data.items():
-            if not bars:
-                continue
-            # آخر شمعة مكتملة = أمس (اليوم الحالي قد لا يكون مكتملاً)
-            # نأخذ أكبر حجم من آخر 3 أيام كمرجع للسيولة
-            vols = [float(b.get("v", 0)) for b in bars if float(b.get("v", 0)) > 0]
-            if vols:
-                vol_map[symbol] = max(vols)
-
-        time.sleep(0.3)
-
-    return vol_map
-
 
 def get_ema200_batch(symbols: list) -> dict:
 
