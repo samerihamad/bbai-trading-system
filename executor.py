@@ -471,7 +471,7 @@ def sync_with_alpaca(open_trades: list) -> list:
                         target=trade.target_tp2,
                         risk_amount=getattr(trade, "risk_amount", 0),
                         exit_reason=exit_reason,
-                        opened_at=getattr(trade, "opened_at", None) or __import__("datetime").datetime.now(),
+                        opened_at=getattr(trade, "opened_at", None) or datetime.now(pytz.utc),
                         side=trade.side,
                     )
                 except Exception as e:
@@ -482,13 +482,14 @@ def sync_with_alpaca(open_trades: list) -> list:
                     from notifier import notify_trade_win, notify_trade_loss
                     duration = ""
                     if hasattr(trade, "opened_at") and trade.opened_at:
-                        import datetime as _dt
                         import pytz as _pytz
-                        TZ_ = _pytz.timezone("America/New_York")
-                        now_ = _dt.datetime.now(_pytz.utc).astimezone(TZ_)
-                        oa   = trade.opened_at if hasattr(trade.opened_at, "tzinfo") else TZ_.localize(trade.opened_at)
+                        now_ = datetime.now(_pytz.utc)
+                        oa   = trade.opened_at
+                        # إذا كان naive (بيانات قديمة من Sheets) → نعطيه UTC
+                        if oa.tzinfo is None:
+                            oa = _pytz.utc.localize(oa)
                         mins = int((now_ - oa).total_seconds() / 60)
-                        duration = f"{mins}d" if mins >= 1440 else f"{mins}m"
+                        duration = f"{mins//1440}d" if mins >= 1440 else f"{mins}m"
                     if pnl >= 0:
                         notify_trade_win(
                             ticker=trade.ticker, side=trade.side,
@@ -604,7 +605,8 @@ class OpenTrade:
 
     def __post_init__(self):
         if self.opened_at is None:
-            self.opened_at = datetime.utcnow()
+            import pytz
+            self.opened_at = datetime.now(pytz.utc)
         # تهيئة peak_price بسعر الدخول
         if self.peak_price == 0.0:
             self.peak_price = self.entry_price
