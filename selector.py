@@ -124,7 +124,7 @@ def score_signal(sig: MeanRevSignal) -> float:
 # 1. جلب البيانات اليومية
 # ─────────────────────────────────────────
 
-def fetch_daily_bars(ticker: str, days: int = 30) -> pd.DataFrame:
+def fetch_daily_bars(ticker: str, days: int = 60) -> pd.DataFrame:
     """يجلب الشموع اليومية لحساب مؤشرات التصنيف."""
     end   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
