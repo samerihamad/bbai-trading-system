@@ -392,7 +392,29 @@ def monitor_open_trades():
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
                 trade.closing_in_progress = True
                 trade.tp1_hit             = True   # ← فوراً لمنع التكرار في loops القادمة
-                place_market_sell(trade.ticker, tp1_qty, side=side)
+                order_id = place_market_sell(trade.ticker, tp1_qty, side=side)
+
+                if not order_id:
+                    # ── فشل الأمر → تراجع عن tp1_hit وأزل الصفقة من النظام إذا كانت غير موجودة في Alpaca
+                    log(f"⚠️  فشل TP1 لـ {trade.ticker} — التحقق من الوضع في Alpaca...")
+                    try:
+                        import requests as _r
+                        _pos = _r.get(f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}",
+                                      headers=HEADERS, timeout=8)
+                        if _pos.status_code == 404:
+                            # الصفقة غير موجودة في Alpaca — أزلها من النظام
+                            log(f"❌ {trade.ticker} غير موجود في Alpaca — إزالة من النظام")
+                            trades_to_remove.append(trade)
+                        else:
+                            # لا تزال موجودة — تراجع عن tp1_hit وانتظر
+                            trade.tp1_hit             = False
+                            trade.closing_in_progress = False
+                            log(f"🔄 {trade.ticker} لا تزال مفتوحة في Alpaca — إعادة المحاولة في الدورة القادمة")
+                    except Exception as e:
+                        trade.tp1_hit             = False
+                        trade.closing_in_progress = False
+                        log(f"⚠️  فشل التحقق من {trade.ticker}: {e}")
+                    continue
                 pnl_tp1 = round(
                     (price - trade.entry_price) * tp1_qty if side == "long"
                     else (trade.entry_price - price) * tp1_qty, 2
@@ -435,7 +457,17 @@ def monitor_open_trades():
                 label    = "TP2" if trade.tp1_hit else "TARGET"
                 log(f"{label}: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f}")
                 trade.closing_in_progress = True
-                place_market_sell(trade.ticker, exit_qty, side=side)
+
+                from executor import get_position_qty_available
+                available = get_position_qty_available(trade.ticker)
+                if available == 0:
+                    log(f"  ℹ️  {trade.ticker}: Alpaca نفّذ الـ {label} تلقائياً — تسجيل فقط")
+                elif available < exit_qty:
+                    log(f"  ⚠️  {trade.ticker}: متاح={available} < مطلوب={exit_qty} → بيع ما هو متاح")
+                    place_market_sell(trade.ticker, available, side=side)
+                    exit_qty = available
+                else:
+                    place_market_sell(trade.ticker, exit_qty, side=side)
                 pnl = round(
                     (price - trade.entry_price) * exit_qty if side == "long"
                     else (trade.entry_price - price) * exit_qty, 2
