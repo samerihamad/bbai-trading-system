@@ -74,6 +74,7 @@ last_scan    : datetime          = datetime.now(TZ) - timedelta(hours=2)
 last_universe_refresh : datetime = datetime.now(TZ) - timedelta(hours=2)
 SCAN_INTERVAL_MIN     : int      = 5    # فحص الإشارات كل 5 دقائق
 UNIVERSE_REFRESH_MIN  : int      = 60   # تحديث قائمة الأسهم كل ساعة
+_startup_time         : datetime = datetime.now(TZ)  # وقت بدء التشغيل
 
 _pre_market_done  : bool = False
 _pre_alert_done   : bool = False
@@ -758,8 +759,14 @@ def main():
                     if system_state.maintenance_mode:
                         log("MAINTENANCE MODE -- waiting for /resume before pre-market")
                     else:
-                        log("Started during market hours -- running pre-market now...")
-                        run_pre_market()
+                        # ── انتظر دقيقتين بعد الـ startup لاستقرار IEX feed
+                        elapsed = (datetime.now(TZ) - _startup_time).total_seconds()
+                        if elapsed < 120:
+                            remaining = int(120 - elapsed)
+                            log(f"⏳ تهيئة السيرفر — انتظار {remaining}s لاستقرار البيانات...")
+                        else:
+                            log("Started during market hours -- running pre-market now...")
+                            run_pre_market()
                 elif daily_stocks:
                     monitor_open_trades()
                     refresh_universe_if_needed()
