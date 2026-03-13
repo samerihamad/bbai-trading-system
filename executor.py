@@ -782,10 +782,29 @@ def sync_trade_state_with_alpaca(trade) -> bool:
     - تكتشف TP1 تلقائياً إذا أغلق Alpaca النصف بنفسه
     - تحدّث quantity_remaining
     - تحرّك SL إلى breakeven في Alpaca فعلياً
+
+    Grace period: إذا الصفقة فُتحت منذ أقل من 3 دقائق ولم تظهر بعد
+    في positions (bracket pending) — لا نحذفها.
     """
+    from datetime import datetime, timezone
+
+    GRACE_SECONDS = 180  # 3 دقائق
+
     try:
         r = requests.get(f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}", headers=HEADERS, timeout=10)
         if r.status_code == 404:
+            # ── تحقق من grace period قبل الحكم بالإغلاق
+            try:
+                opened = trade.opened_at
+                if opened is not None:
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - opened).total_seconds()
+                    if age < GRACE_SECONDS:
+                        print(f"  ⏳ {trade.ticker}: 404 لكن فُتحت منذ {age:.0f}s — grace period، لا حذف")
+                        return True  # treat as still open
+            except Exception:
+                pass
             return False  # الصفقة مغلقة بالكامل
         if r.status_code != 200:
             return True   # خطأ مؤقت — لا تغيّر شيء
