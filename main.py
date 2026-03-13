@@ -508,7 +508,21 @@ def scan_for_signals():
             log("Could not fetch account -- skipping scan")
             return
 
+        # ── current_positions: من الذاكرة + Alpaca مباشرة (يمنع bracket مكرر)
         current_positions = {t.ticker: (t.side, t.strategy) for t in open_trades}
+        try:
+            from executor import ALPACA_BASE_URL, HEADERS
+            import requests as _req
+            pos_r = _req.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=8)
+            if pos_r.status_code == 200:
+                for pos in pos_r.json():
+                    sym = pos.get("symbol", "")
+                    if sym and sym not in current_positions:
+                        alpaca_side = "long" if pos.get("side") == "long" else "short"
+                        current_positions[sym] = (alpaca_side, "unknown")
+                        log(f"  ⚠️  {sym} موجود في Alpaca لكن ليس في الذاكرة — مستثنى من الفحص")
+        except Exception as _e:
+            log(f"  ⚠️  تعذّر جلب positions من Alpaca للفحص: {_e}")
         balance           = account["balance"]
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
@@ -554,66 +568,6 @@ def scan_for_signals():
 
 
 # -----------------------------------------
-# أرشفة نهاية الشهر
-# -----------------------------------------
-
-def _maybe_archive_month():
-    """
-    يُستدعى تلقائياً في نهاية كل يوم من run_market_close.
-    يتحقق إذا كان اليوم هو آخر يوم عمل (إثنين–جمعة) في الشهر الحالي،
-    فإذا كان كذلك يؤرشف صفقات الشهر المنتهي.
-    """
-    from calendar import monthrange
-    from datetime import date, timedelta
-    import pytz
-
-    try:
-        TZ    = pytz.timezone(os.getenv("TIMEZONE", "America/New_York"))
-        today = datetime.now(TZ).date()
-
-        # حسب آخر يوم تقويمي في الشهر
-        _, last_day_num = monthrange(today.year, today.month)
-        last_cal        = date(today.year, today.month, last_day_num)
-
-        # آخر يوم عمل = نرجع للخلف حتى نجد إثنين-جمعة
-        last_bday = last_cal
-        while last_bday.weekday() > 4:          # 5=السبت، 6=الأحد
-            last_bday -= timedelta(days=1)
-
-        if today != last_bday:
-            return  # ليس آخر يوم عمل في الشهر — لا شيء
-
-        log(f"📦 آخر يوم عمل في الشهر ({today}) — بدء الأرشفة...")
-        from executor import archive_month
-        result = archive_month(today.year, today.month)
-
-        if result.get("error"):
-            log(f"  ❌ فشل الأرشفة: {result['error']}")
-            try:
-                from notifier import _send
-                _send(
-                    f"⚠️ <b>فشل أرشفة {today.year}-{today.month:02d}</b>\n"
-                    f"السبب: {result['error']}\n"
-                    f"راجع Closed Trades يدوياً."
-                )
-            except Exception:
-                pass
-        else:
-            log(f"  ✅ أُرشف {result['archived']} صفقة → {result['sheet']}")
-            try:
-                from notifier import _send
-                _send(
-                    f"📦 <b>أرشفة شهرية — {result['sheet']}</b>\n"
-                    f"✅ تم نقل <b>{result['archived']}</b> صفقة\n"
-                    f"من Closed Trades → {result['sheet']}"
-                )
-            except Exception:
-                pass
-
-    except Exception as e:
-        log(f"  ⚠️  _maybe_archive_month: {e}")
-
-
 # روتين إغلاق السوق
 # -----------------------------------------
 
@@ -652,9 +606,6 @@ def run_market_close():
         balance = account.get("balance", 0) if account else 0
         send_daily_report(balance, open_trades=open_trades_summary)
         log("Daily report sent")
-
-        # ── أرشفة تلقائية في آخر يوم عمل من الشهر
-        _maybe_archive_month()
 
     except Exception as e:
         log(f"Error in run_market_close: {e}")
