@@ -329,6 +329,105 @@ def _handle_command(command: str, context: dict):
             except Exception as e:
                 _send(f"❌ خطأ في إغلاق المراكز: {e}")
 
+    # ── /archives : قائمة الأرشيفات المتاحة
+    elif command == "/archives":
+        try:
+            from executor import list_available_archives
+            archives = list_available_archives()
+            if not archives:
+                _send(
+                    "📦 <b>الأرشيفات</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "لا توجد أرشيفات بعد.\n"
+                    "تُنشأ تلقائياً في نهاية كل شهر."
+                )
+            else:
+                lines = "\n".join(f"  📁 {a}" for a in archives)
+                _send(
+                    f"📦 <b>الأرشيفات المتاحة ({len(archives)})</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"{lines}\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "لاستدعاء أرشيف معين:\n"
+                    "<code>/getarchive 2026-03</code>"
+                )
+        except Exception as e:
+            _send(f"❌ خطأ في جلب الأرشيفات: {e}")
+
+    # ── /getarchive YYYY-MM : تحميل أرشيف شهر كملف CSV
+    elif command.startswith("/getarchive"):
+        parts = command.split()
+        if len(parts) != 2 or len(parts[1]) != 7:
+            _send(
+                "❓ <b>استخدام خاطئ</b>\n"
+                "الصيغة الصحيحة:\n"
+                "<code>/getarchive YYYY-MM</code>\n"
+                "مثال: <code>/getarchive 2026-03</code>"
+            )
+        else:
+            month_str = parts[1]
+            try:
+                year, month = int(month_str[:4]), int(month_str[5:])
+                from executor import load_from_archive
+                trades = load_from_archive(year, month)
+
+                if not trades:
+                    _send(f"ℹ️ لا توجد بيانات في أرشيف <b>{month_str}</b>.")
+                else:
+                    import io, csv
+                    buffer = io.StringIO()
+                    writer = csv.DictWriter(buffer, fieldnames=trades[0].keys())
+                    writer.writeheader()
+                    writer.writerows(trades)
+                    csv_bytes = buffer.getvalue().encode("utf-8-sig")
+
+                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+                    _send(f"📄 جاري إرسال أرشيف <b>{month_str}</b> ({len(trades)} صفقة)...")
+                    requests.post(
+                        url,
+                        data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"📦 Archive {month_str} — {len(trades)} trades"},
+                        files={"document": (f"archive_{month_str}.csv", csv_bytes, "text/csv")},
+                        timeout=30,
+                    )
+            except Exception as e:
+                _send(f"❌ خطأ في إرسال الأرشيف: {e}")
+
+    # ── /archivemonth YYYY-MM : أرشفة يدوية لشهر معين
+    elif command.startswith("/archivemonth"):
+        parts = command.split()
+        if len(parts) != 2 or len(parts[1]) != 7:
+            _send(
+                "❓ <b>استخدام خاطئ</b>\n"
+                "الصيغة الصحيحة:\n"
+                "<code>/archivemonth YYYY-MM</code>\n"
+                "مثال: <code>/archivemonth 2026-03</code>\n\n"
+                "⚠️ تتم الأرشفة تلقائياً في نهاية كل شهر.\n"
+                "استخدم هذا الأمر فقط للأرشفة اليدوية."
+            )
+        else:
+            month_str = parts[1]
+            try:
+                year, month = int(month_str[:4]), int(month_str[5:])
+                _send(f"⏳ جاري أرشفة شهر <b>{month_str}</b>...")
+                from executor import archive_month
+                result = archive_month(year, month)
+
+                if result.get("error"):
+                    _send(f"❌ فشل الأرشفة: {result['error']}")
+                elif result["archived"] == 0:
+                    _send(f"ℹ️ لا توجد صفقات في <b>{month_str}</b> لأرشفتها.")
+                else:
+                    _send(
+                        f"✅ <b>تمت الأرشفة بنجاح</b>\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"📁 الشيت: <b>{result['sheet']}</b>\n"
+                        f"📊 عدد الصفقات: <b>{result['archived']}</b>\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"أرسل <code>/getarchive {month_str}</code> لتحميلها."
+                    )
+            except Exception as e:
+                _send(f"❌ خطأ في الأرشفة: {e}")
+
     # ── /deploy : تشغيل Deploy جديد بعد رفع الملفات على GitHub
     elif command == "/deploy":
         if not system_state.maintenance_mode:
@@ -375,6 +474,12 @@ def _handle_command(command: str, context: dict):
             "    عرض حالة النظام الآن\n\n"
             "🚨 /closeall\n"
             "    إغلاق كل الصفقات المفتوحة فوراً\n\n"
+            "📦 /archives\n"
+            "    قائمة الأرشيفات الشهرية المتاحة\n\n"
+            "📥 /getarchive YYYY-MM\n"
+            "    تحميل أرشيف شهر كملف CSV\n\n"
+            "🗄 /archivemonth YYYY-MM\n"
+            "    أرشفة يدوية لشهر معين\n\n"
             "📖 /help\n"
             "    هذه القائمة"
         )
