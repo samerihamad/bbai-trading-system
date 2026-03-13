@@ -166,173 +166,15 @@ def save_closed_trade_sheets(record: dict) -> None:
 
 
 def load_closed_trades_by_date_sheets(target_date: str) -> list[dict]:
-    """
-    يجلب صفقات يوم معين.
-    يبحث أولاً في 'Closed Trades' الحالي،
-    فإذا لم يجد نتائج يبحث في أرشيف الشهر المقابل (مثلاً 'Archive-2026-03').
-    """
-    gc = _get_sheets_client()
-    if not gc:
+    """يجلب صفقات يوم معين من Google Sheets."""
+    ws = _get_closed_trades_ws()
+    if not ws:
         return []
     try:
-        ss = gc.open_by_key(SHEET_ID)
-
-        # ── 1. البحث في الشيت الحالي أولاً
-        try:
-            ws = ss.worksheet(CLOSED_TRADES_SHEET)
-            rows = ws.get_all_records()
-            results = [r for r in rows if str(r.get("date", "")) == target_date]
-            if results:
-                return results
-        except Exception:
-            pass
-
-        # ── 2. البحث في الأرشيف إذا لم نجد في الشيت الحالي
-        month_prefix = target_date[:7]                   # "2026-03"
-        archive_name = f"Archive-{month_prefix}"
-        try:
-            ws_arch = ss.worksheet(archive_name)
-            rows_arch = ws_arch.get_all_records()
-            return [r for r in rows_arch if str(r.get("date", "")) == target_date]
-        except Exception:
-            pass  # شيت الأرشيف غير موجود — طبيعي
-
-        return []
+        rows = ws.get_all_records()
+        return [r for r in rows if str(r.get("date", "")) == target_date]
     except Exception as e:
         print(f"⚠️  فشل جلب Closed Trades من Sheets: {e}")
-        return []
-
-
-# ─────────────────────────────────────────
-# أرشفة الصفقات الشهرية
-# ─────────────────────────────────────────
-
-def archive_month(year: int, month: int) -> dict:
-    """
-    يؤرشف صفقات شهر كامل من 'Closed Trades' إلى شيت 'Archive-YYYY-MM'.
-
-    الخطوات:
-      1. يجلب كل الصفقات المطابقة للشهر من 'Closed Trades'
-      2. ينشئ (أو يفتح) شيت 'Archive-YYYY-MM' ويكتب البيانات فيه
-      3. يحذف الصفوف المنقولة من 'Closed Trades' بشكل آمن
-
-    يُرجع dict فيه:
-      archived  : عدد الصفقات المنقولة
-      sheet     : اسم شيت الأرشيف
-      skipped   : عدد الصفقات التي فشل نقلها (يبقى في Closed Trades)
-    """
-    from calendar import monthrange
-
-    month_str    = f"{year:04d}-{month:02d}"          # "2026-03"
-    archive_name = f"Archive-{month_str}"
-
-    gc = _get_sheets_client()
-    if not gc:
-        return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": "no sheets client"}
-
-    try:
-        ss = gc.open_by_key(SHEET_ID)
-
-        # ── 1. جلب شيت Closed Trades
-        try:
-            ws_closed = ss.worksheet(CLOSED_TRADES_SHEET)
-        except Exception:
-            return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": "Closed Trades غير موجود"}
-
-        all_rows  = ws_closed.get_all_values()   # قائمة قوائم (بما فيها الـ headers)
-        if not all_rows:
-            return {"archived": 0, "sheet": archive_name, "skipped": 0}
-
-        headers   = all_rows[0]
-        data_rows = all_rows[1:]                 # الصفوف بدون headers
-
-        # ── 2. فصل صفوف الشهر المطلوب عن الباقي
-        month_rows  = []
-        remain_rows = []
-        for row in data_rows:
-            date_val = row[0] if row else ""     # عمود "date" هو الأول
-            if str(date_val).startswith(month_str):
-                month_rows.append(row)
-            else:
-                remain_rows.append(row)
-
-        if not month_rows:
-            print(f"  ℹ️  لا توجد صفقات في {month_str} للأرشفة")
-            return {"archived": 0, "sheet": archive_name, "skipped": 0}
-
-        # ── 3. فتح أو إنشاء شيت الأرشيف
-        try:
-            ws_arch = ss.worksheet(archive_name)
-            # إذا موجود مسبقاً — نتحقق هل فيه headers
-            existing = ws_arch.get_all_values()
-            if not existing:
-                ws_arch.append_row(headers, value_input_option="RAW")
-        except Exception:
-            ws_arch = ss.add_worksheet(
-                title=archive_name,
-                rows=max(500, len(month_rows) + 10),
-                cols=len(headers),
-            )
-            ws_arch.append_row(headers, value_input_option="RAW")
-
-        # ── 4. كتابة صفوف الشهر في الأرشيف دفعة واحدة
-        ws_arch.append_rows(month_rows, value_input_option="RAW")
-        print(f"  ✅ كُتب {len(month_rows)} صفقة في {archive_name}")
-
-        # ── 5. إعادة كتابة Closed Trades بالصفوف المتبقية فقط
-        ws_closed.clear()
-        ws_closed.append_row(headers, value_input_option="RAW")
-        if remain_rows:
-            ws_closed.append_rows(remain_rows, value_input_option="RAW")
-        print(f"  ✅ Closed Trades نُظِّف — تبقّى {len(remain_rows)} صفقة")
-
-        return {
-            "archived": len(month_rows),
-            "sheet":    archive_name,
-            "skipped":  0,
-        }
-
-    except Exception as e:
-        print(f"  ❌ فشل الأرشفة: {e}")
-        return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": str(e)}
-
-
-def load_from_archive(year: int, month: int) -> list[dict]:
-    """
-    يجلب كل صفقات شهر معين من شيت الأرشيف 'Archive-YYYY-MM'.
-    يُستخدم للتحليل التاريخي.
-    """
-    month_str    = f"{year:04d}-{month:02d}"
-    archive_name = f"Archive-{month_str}"
-
-    gc = _get_sheets_client()
-    if not gc:
-        return []
-    try:
-        ss      = gc.open_by_key(SHEET_ID)
-        ws_arch = ss.worksheet(archive_name)
-        rows    = ws_arch.get_all_records()
-        print(f"  ✅ جُلب {len(rows)} صفقة من {archive_name}")
-        return rows
-    except Exception as e:
-        print(f"  ⚠️  {archive_name} غير موجود أو فشل الجلب: {e}")
-        return []
-
-
-def list_available_archives() -> list[str]:
-    """
-    يُرجع قائمة بأسماء شيتات الأرشيف الموجودة في الملف مرتبة تصاعدياً.
-    مثال: ['Archive-2026-01', 'Archive-2026-02', 'Archive-2026-03']
-    """
-    gc = _get_sheets_client()
-    if not gc:
-        return []
-    try:
-        ss     = gc.open_by_key(SHEET_ID)
-        titles = [ws.title for ws in ss.worksheets() if ws.title.startswith("Archive-")]
-        return sorted(titles)
-    except Exception as e:
-        print(f"  ⚠️  فشل جلب قائمة الأرشيفات: {e}")
         return []
 
 
@@ -627,6 +469,30 @@ def place_bracket_order(
         },
     }
 
+    # ── تحقق من عدم وجود مركز مفتوح مسبقاً لنفس السهم
+    # Bracket orders تفشل إذا كان هناك position أو open order موجود
+    try:
+        pos_r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
+            headers=HEADERS, timeout=10,
+        )
+        if pos_r.status_code == 200:
+            existing_qty = abs(int(float(pos_r.json().get("qty", 0))))
+            if existing_qty > 0:
+                print(f"⛔ {ticker}: يوجد مركز مفتوح ({existing_qty} سهم) — تخطي الأمر الجديد")
+                try:
+                    from notifier import _send
+                    _send(
+                        f"⚠️ <b>تخطي {ticker}</b>\n"
+                        f"يوجد مركز مفتوح مسبقاً ({existing_qty} سهم).\n"
+                        f"النظام لا يفتح صفقة مكررة على نفس السهم."
+                    )
+                except Exception:
+                    pass
+                return None
+    except Exception:
+        pass  # إذا فشل التحقق — نكمل ونحاول
+
     try:
         response = requests.post(
             f"{ALPACA_BASE_URL}/v2/orders",
@@ -645,25 +511,37 @@ def place_bracket_order(
             error_msg = data.get("message", "خطأ غير معروف")
             print(f"❌ فشل أمر {ticker}: {error_msg}")
 
-            # ── إشعار Telegram عند خطأ PDT
-            if "pattern day trading" in error_msg.lower():
-                try:
-                    from notifier import _send
-                    side_ar  = "شراء 🟢" if side == "long" else "بيع 🔴"
+            # ── إشعار Telegram مع سبب الفشل
+            try:
+                from notifier import _send
+                side_ar = "شراء 🟢" if side == "long" else "بيع 🔴"
+
+                if "pattern day trading" in error_msg.lower():
                     _send(
                         f"⛔ <b>تعذّر فتح الصفقة — قيود PDT</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n\n"
-                        f"🇬🇧 <b>English</b>\n"
-                        f"🔒 Trade blocked by Pattern Day Trading rule.\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
                         f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
-                        f"💡 Solution: Raise account balance above $25,000.\n\n"
-                        f"🇦🇪 <b>العربية</b>\n"
-                        f"🔒 تم حجب الصفقة بسبب قاعدة PDT.\n"
-                        f"📌 {ticker} | {side_ar} | دخول=${entry_price:.2f}\n"
                         f"💡 الحل: ارفع رصيد الحساب فوق $25,000."
                     )
-                except Exception:
-                    pass
+                elif "bracket" in error_msg.lower() and "entry" in error_msg.lower():
+                    # bracket orders must be entry orders = يوجد مركز مفتوح في Alpaca
+                    # لم يُكتشف في التحقق المبكر — نُشعر فوراً
+                    _send(
+                        f"⚠️ <b>فشل فتح {ticker} — مركز موجود مسبقاً</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
+                        f"❗ Alpaca رفض الأمر: {error_msg}\n"
+                        f"🔎 تحقق من Positions في Alpaca يدوياً.\n"
+                        f"⚠️ إذا وجدت مركز مفتوح بلا stop — أغلقه فوراً."
+                    )
+                else:
+                    _send(
+                        f"❌ <b>فشل فتح صفقة {ticker}</b>\n"
+                        f"📌 {side_ar} | entry=${entry_price:.2f}\n"
+                        f"السبب: {error_msg}"
+                    )
+            except Exception:
+                pass
 
             return None
 
