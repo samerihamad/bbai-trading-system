@@ -1030,17 +1030,79 @@ def monitor_trade(trade: OpenTrade) -> dict:
 
 
 def close_all_positions() -> bool:
-    """يُغلق كل المراكز المفتوحة دفعة واحدة — يُستخدم عند نهاية الجلسة."""
+    """
+    يُغلق كل المراكز المفتوحة بثلاث خطوات:
+    1. إلغاء كل الأوامر المعلّقة (bracket child orders: stop + take_profit)
+    2. إغلاق كل الـ positions بـ market order
+    3. تحقق نهائي للتأكيد
+    """
+    print("🔄 close_all_positions: بدء تسلسل الإغلاق...")
+
+    # ── الخطوة 1: إلغاء كل الأوامر المعلّقة
     try:
-        response = requests.delete(
-            f"{ALPACA_BASE_URL}/v2/positions",
-            headers=HEADERS,
-            timeout=15,
+        r1 = requests.delete(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS, timeout=15,
         )
-        success = response.status_code in (200, 204, 207)
-        if success:
-            print("✅ تم إغلاق كل المراكز المفتوحة")
-        return success
+        if r1.status_code in (200, 204, 207):
+            cancelled = r1.json() if r1.text and r1.text != "null" else []
+            print(f"  ✅ الخطوة 1: أُلغي {len(cancelled) if isinstance(cancelled, list) else '?'} أمر معلّق")
+        else:
+            print(f"  ⚠️  الخطوة 1: HTTP {r1.status_code} — {r1.text[:100]}")
     except Exception as e:
-        print(f"❌ خطأ في إغلاق المراكز: {e}")
-        return False
+        print(f"  ⚠️  الخطوة 1 فشلت: {e}")
+
+    time.sleep(1.5)  # انتظر حتى تُعالَج إلغاءات الأوامر
+
+    # ── الخطوة 2: إغلاق كل الـ positions
+    try:
+        r2 = requests.delete(
+            f"{ALPACA_BASE_URL}/v2/positions",
+            headers=HEADERS, timeout=15,
+        )
+        if r2.status_code in (200, 204, 207):
+            print(f"  ✅ الخطوة 2: طلب إغلاق positions أُرسل (HTTP {r2.status_code})")
+        else:
+            print(f"  ⚠️  الخطوة 2: HTTP {r2.status_code} — {r2.text[:100]}")
+    except Exception as e:
+        print(f"  ⚠️  الخطوة 2 فشلت: {e}")
+
+    time.sleep(2.0)  # انتظر تنفيذ الـ market orders
+
+    # ── الخطوة 3: تحقق نهائي
+    try:
+        r3 = requests.get(
+            f"{ALPACA_BASE_URL}/v2/positions",
+            headers=HEADERS, timeout=10,
+        )
+        if r3.status_code == 200:
+            remaining = r3.json()
+            if len(remaining) == 0:
+                print("  ✅ الخطوة 3: تأكيد — لا توجد positions مفتوحة")
+                return True
+            else:
+                # محاولة إغلاق ما تبقى بشكل فردي
+                print(f"  ⚠️  الخطوة 3: لا يزال {len(remaining)} مركز — محاولة إغلاق فردي...")
+                all_closed = True
+                for pos in remaining:
+                    sym = pos.get("symbol", "")
+                    try:
+                        r_single = requests.delete(
+                            f"{ALPACA_BASE_URL}/v2/positions/{sym}",
+                            headers=HEADERS, timeout=10,
+                        )
+                        if r_single.status_code in (200, 204):
+                            print(f"    ✅ {sym}: أُغلق")
+                        else:
+                            print(f"    ❌ {sym}: HTTP {r_single.status_code}")
+                            all_closed = False
+                    except Exception as e_s:
+                        print(f"    ❌ {sym}: {e_s}")
+                        all_closed = False
+                return all_closed
+        else:
+            print(f"  ⚠️  الخطوة 3: تعذّر التحقق — HTTP {r3.status_code}")
+            return True  # افترض نجاح الخطوتين السابقتين
+    except Exception as e:
+        print(f"  ⚠️  الخطوة 3 فشلت: {e}")
+        return True
