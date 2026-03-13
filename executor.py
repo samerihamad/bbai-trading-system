@@ -285,24 +285,78 @@ def get_open_positions() -> list:
 
 
 def sync_with_alpaca(open_trades: list) -> list:
-    """يكتشف الصفقات المغلقة يدوياً في Alpaca ويحذفها من القائمة."""
+    """
+    يكتشف الصفقات المغلقة يدوياً في Alpaca ويحذفها من القائمة.
+
+    حماية من الحذف الخاطئ:
+    - يستخدم retry ×2 قبل الحكم بالإغلاق
+    - يرفض أي رد فارغ [] إذا كان عندنا صفقات مفتوحة
+    - يتحقق من كل صفقة منفردة قبل حذفها (تحقق مزدوج)
+    """
     if not open_trades:
         return open_trades
-    try:
-        r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
-        if r.status_code != 200:
-            return open_trades
-        alpaca_symbols = {pos.get("symbol","") for pos in r.json()}
-        removed = []
-        for trade in open_trades[:]:
-            if trade.ticker not in alpaca_symbols:
-                open_trades.remove(trade)
-                removed.append(trade.ticker)
-                print(f"  ⚠️  {trade.ticker} أُغلقت يدوياً — تم حذفها من المراقبة")
-        if removed:
-            print(f"🔄 Sync: حُذف {len(removed)} صفقة: {removed}")
-    except Exception as e:
-        print(f"⚠️  فشل Sync مع Alpaca: {e}")
+
+    # ── جلب positions من Alpaca مع retry ×2
+    alpaca_symbols = None
+    for attempt in range(1, 3):
+        try:
+            r = requests.get(
+                f"{ALPACA_BASE_URL}/v2/positions",
+                headers=HEADERS, timeout=10,
+            )
+            if r.status_code != 200:
+                print(f"  ⚠️  sync_with_alpaca: HTTP {r.status_code} (محاولة {attempt}/2) — تخطي")
+                time.sleep(1)
+                continue
+
+            positions = r.json()
+
+            # ── حماية: إذا Alpaca أرجع قائمة فارغة لكن عندنا صفقات — شك في الرد
+            if len(positions) == 0 and len(open_trades) > 0:
+                print(f"  ⚠️  sync_with_alpaca: Alpaca أرجع [] لكن عندنا {len(open_trades)} صفقة — تجاهل (محاولة {attempt}/2)")
+                time.sleep(1.5)
+                continue
+
+            alpaca_symbols = {pos.get("symbol", "") for pos in positions}
+            break  # رد صحيح — نخرج من الـ retry
+
+        except Exception as e:
+            print(f"  ⚠️  sync_with_alpaca محاولة {attempt}/2: {e}")
+            time.sleep(1)
+
+    # ── إذا فشلت كل المحاولات أو الرد مشكوك فيه — لا نحذف شيئاً
+    if alpaca_symbols is None:
+        print("  ⚠️  sync_with_alpaca: تعذّر الحصول على positions موثوق — لا تغيير")
+        return open_trades
+
+    # ── تحقق مزدوج: أي صفقة غائبة عن Alpaca نتحقق منها مرة ثانية قبل الحذف
+    removed = []
+    for trade in open_trades[:]:
+        if trade.ticker not in alpaca_symbols:
+            # تحقق مباشر من هذا السهم تحديداً
+            try:
+                r2 = requests.get(
+                    f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}",
+                    headers=HEADERS, timeout=8,
+                )
+                if r2.status_code == 200:
+                    # لا يزال موجوداً — كان خطأ في القائمة العامة
+                    print(f"  ✅ {trade.ticker}: موجود في Alpaca (تحقق مزدوج) — لا حذف")
+                    continue
+                elif r2.status_code == 404:
+                    # مؤكد مغلق
+                    open_trades.remove(trade)
+                    removed.append(trade.ticker)
+                    print(f"  ⚠️  {trade.ticker}: مغلقة في Alpaca (404 مؤكد) — حُذفت من المراقبة")
+                else:
+                    # رد غير واضح — لا نحذف
+                    print(f"  ⚠️  {trade.ticker}: HTTP {r2.status_code} في التحقق المزدوج — لا حذف")
+            except Exception as e2:
+                print(f"  ⚠️  {trade.ticker}: فشل التحقق المزدوج ({e2}) — لا حذف")
+
+    if removed:
+        print(f"🔄 Sync: حُذف {len(removed)} صفقة مؤكدة: {removed}")
+
     return open_trades
 
 
@@ -469,19 +523,19 @@ def place_bracket_order(
         },
     }
 
-    # ── تحقق من عدم وجود مركز مفتوح مسبقاً لنفس السهم
-    # Bracket orders تفشل إذا كان هناك position أو open order موجود
+    # ── تحقق من عدم وجود مركز مفتوح مسبقاً (يمنع: bracket orders must be entry orders)
     try:
         pos_r = requests.get(
             f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
-            headers=HEADERS, timeout=10,
+            headers=HEADERS, timeout=8,
         )
         if pos_r.status_code == 200:
             existing_qty = abs(int(float(pos_r.json().get("qty", 0))))
             if existing_qty > 0:
-                print(f"⛔ {ticker}: يوجد مركز مفتوح ({existing_qty} سهم) — تخطي الأمر الجديد")
+                print(f"⛔ {ticker}: مركز مفتوح مسبقاً ({existing_qty} سهم) — تخطي")
                 try:
                     from notifier import _send
+                    side_ar = "شراء 🟢" if side == "long" else "بيع 🔴"
                     _send(
                         f"⚠️ <b>تخطي {ticker}</b>\n"
                         f"يوجد مركز مفتوح مسبقاً ({existing_qty} سهم).\n"
@@ -491,7 +545,7 @@ def place_bracket_order(
                     pass
                 return None
     except Exception:
-        pass  # إذا فشل التحقق — نكمل ونحاول
+        pass  # فشل التحقق — نكمل ونحاول
 
     try:
         response = requests.post(
@@ -511,28 +565,21 @@ def place_bracket_order(
             error_msg = data.get("message", "خطأ غير معروف")
             print(f"❌ فشل أمر {ticker}: {error_msg}")
 
-            # ── إشعار Telegram مع سبب الفشل
             try:
                 from notifier import _send
                 side_ar = "شراء 🟢" if side == "long" else "بيع 🔴"
-
                 if "pattern day trading" in error_msg.lower():
                     _send(
                         f"⛔ <b>تعذّر فتح الصفقة — قيود PDT</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
                         f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
                         f"💡 الحل: ارفع رصيد الحساب فوق $25,000."
                     )
                 elif "bracket" in error_msg.lower() and "entry" in error_msg.lower():
-                    # bracket orders must be entry orders = يوجد مركز مفتوح في Alpaca
-                    # لم يُكتشف في التحقق المبكر — نُشعر فوراً
                     _send(
-                        f"⚠️ <b>فشل فتح {ticker} — مركز موجود مسبقاً</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"⚠️ <b>فشل فتح {ticker} — مركز موجود في Alpaca</b>\n"
                         f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
-                        f"❗ Alpaca رفض الأمر: {error_msg}\n"
-                        f"🔎 تحقق من Positions في Alpaca يدوياً.\n"
-                        f"⚠️ إذا وجدت مركز مفتوح بلا stop — أغلقه فوراً."
+                        f"❗ {error_msg}\n"
+                        f"⚠️ تحقق من Positions وأغلق أي مركز بلا stop يدوياً."
                     )
                 else:
                     _send(
