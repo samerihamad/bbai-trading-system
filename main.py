@@ -1,718 +1,1105 @@
 # =============================================================
-# main.py -- المحرك الرئيسي للنظام
-# Loop كل 30 ثانية + pytz لقراءة وقت نيويورك (EST/EDT تلقائياً)
-# يدعم أوامر Telegram: /maintenance /resume /status /stop /help
+# executor.py — تنفيذ أوامر الشراء والبيع عبر Alpaca
+# يتعامل مع: LONG و SHORT، فتح الصفقات، TP1/TP2، الوقف المتحرك
 # =============================================================
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+import requests
 import time
-import traceback
-import pytz
-from datetime import datetime, timedelta
+import os
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Optional
 
 from config import (
-    TIMEZONE,
-    MARKET_OPEN,
-    MARKET_CLOSE,
-    NO_OPPORTUNITY_INTERVAL,
-    MAX_TOTAL,
+    ALPACA_API_KEY,
+    ALPACA_SECRET_KEY,
+    ALPACA_BASE_URL,
+    ALPACA_DATA_URL,
 )
-from universe         import get_daily_universe
-from selector         import run_selector
-from executor         import (
-    get_account,
-    get_next_market_open,
-    get_current_price,
-    get_open_positions,
-    sync_with_alpaca,
-    sync_trade_state_with_alpaca,
-    update_stop_in_alpaca,
-    open_meanrev_trade,
-    monitor_trade,
-    place_market_sell,
-    close_all_positions,
-    _save_open_trades,
-    _delete_open_trades_sheets,
-    OpenTrade,
-)
-from strategy_meanrev import refresh_allowed_tickers
-from risk             import DailyRiskManager
-from reporter         import record_trade, send_daily_report
-from notifier         import (
-    notify_pre_market,
-    notify_no_opportunity,
-    notify_trade_open,
-    notify_trade_win,
-    notify_trade_loss,
-    notify_stop_updated,
-    notify_system_stopped,
-)
-from telegram_commands import (
-    system_state,
-    start_command_listener,
-    notify_error,
-)
+from strategy_meanrev import MeanRevSignal, update_trailing_stop
+from risk import calculate_position_size, calculate_r
 
-TZ = pytz.timezone(TIMEZONE)
-
-# -----------------------------------------
-# الحالة العامة للنظام
-# -----------------------------------------
-
-risk_manager : DailyRiskManager = DailyRiskManager()
-open_trades  : list              = []
-daily_stocks : dict              = {}
-last_no_opp  : datetime          = datetime.now(TZ) - timedelta(hours=2)
-last_scan    : datetime          = datetime.now(TZ) - timedelta(hours=2)
-last_universe_refresh : datetime = datetime.now(TZ) - timedelta(hours=2)
-SCAN_INTERVAL_MIN     : int      = 5    # فحص الإشارات كل 5 دقائق
-UNIVERSE_REFRESH_MIN  : int      = 60   # تحديث قائمة الأسهم كل ساعة
-
-_pre_market_done  : bool = False
-_pre_alert_done   : bool = False
-_close_done      : bool = False
-_current_day     : str  = ""
-
-# تتبع الأخطاء المتكررة لإرسال إشعار مرة واحدة فقط
-_consecutive_errors : int  = 0
-_error_notified     : bool = False
+# ─────────────────────────────────────────
+# Google Sheets — حفظ الصفقات المفتوحة
+# ─────────────────────────────────────────
+SHEET_ID           = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
+OPEN_TRADES_SHEET  = "Open Trades"
+CLOSED_TRADES_SHEET = "Closed Trades"
+CREDENTIALS_ENV   = "GOOGLE_CREDENTIALS_JSON"
 
 
-# -----------------------------------------
-# الدوال المساعدة
-# -----------------------------------------
-
-def log(msg: str):
-    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-    print(f"[{now}]  {msg}", flush=True)
-
-
-def get_ny_time() -> datetime:
-    return datetime.now(TZ)
-
-
-def is_weekday() -> bool:
-    return get_ny_time().weekday() < 5
-
-
-def is_pre_market_alert_time() -> bool:
-    """09:00 → رسالة تنبيه فقط 'السوق يفتح بعد 30 دقيقة'"""
-    if not is_weekday():
-        return False
-    t = get_ny_time().strftime("%H:%M")
-    return "09:00" <= t < "09:05"
-
-
-def is_pre_market_time() -> bool:
-    """09:35 → تشغيل Pre-Market الفعلي (اختيار الأسهم)"""
-    if not is_weekday():
-        return False
-    t = get_ny_time().strftime("%H:%M")
-    return "09:35" <= t < "09:45"
-
-
-def is_market_hours() -> bool:
-    if not is_weekday():
-        return False
-    t = get_ny_time().strftime("%H:%M")
-    return MARKET_OPEN <= t <= MARKET_CLOSE
-
-
-def is_close_time() -> bool:
-    """
-    يُرجع True فقط في نافذة إغلاق السوق: 15:45 → 16:05
-    بعد 16:05 يُرجع False لتجنب إرسال التقرير عند كل Deploy.
-    """
-    if not is_weekday():
-        return False
-    t = get_ny_time().strftime("%H:%M")
-    return MARKET_CLOSE <= t <= "16:05"
-
-
-def check_new_day():
-    global _pre_market_done, _close_done, _current_day, _pre_alert_done
-    today = get_ny_time().strftime("%Y-%m-%d")
-    if today != _current_day:
-        _current_day     = today
-        _pre_market_done = False
-        _pre_alert_done  = False
-        _close_done      = False
-        log(f"New trading day: {today} -- flags reset")
-
-
-def get_system_context() -> dict:
-    """
-    تُرجع الحالة الحالية للنظام.
-    يستخدمها telegram_commands.py لأمر /status.
-    """
-    return {
-        "open_trades":     open_trades,
-        "risk_manager":    risk_manager,
-        "daily_stocks":    daily_stocks,
-        "pre_market_done": _pre_market_done,
-        "close_done":      _close_done,
-    }
-
-
-# -----------------------------------------
-# روتين ما قبل الافتتاح
-# -----------------------------------------
-
-def run_pre_market_alert():
-    """09:00 — رسالة تنبيه فقط بدون اختيار أسهم."""
-    global _pre_alert_done
-    if _pre_alert_done:
-        return
-    _pre_alert_done = True
+def _get_sheets_client():
     try:
-        from notifier import _send
-        _send(
-            "🔔 <b>تنبيه | Market Alert</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "🇬🇧 Market opens in <b>30 minutes</b>\n\n"
-            "🇦🇪 السوق يفتح بعد <b>30 دقيقة</b>"
-        )
-        log("Pre-market alert sent — market opens in 30 min")
+        import gspread, json as _j
+        from google.oauth2.service_account import Credentials
+        scopes = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_json = os.getenv(CREDENTIALS_ENV)
+        if creds_json:
+            creds = Credentials.from_service_account_info(_j.loads(creds_json), scopes=scopes)
+        else:
+            creds = Credentials.from_service_account_file("bbai-489218-bca75c7e5d12.json", scopes=scopes)
+        return gspread.authorize(creds)
     except Exception as e:
-        log(f"Alert error: {e}")
+        print(f"⚠️  Google Sheets غير متاح: {e}")
+        return None
 
 
-def run_pre_market():
-    global daily_stocks, _pre_market_done
-
-    log("=== PRE-MARKET ROUTINE START ===")
-    risk_manager.reset()
-
-    # ── محاولة جلب الأسهم مع retry ×3
-    for attempt in range(1, 4):
+def _get_open_trades_ws():
+    gc = _get_sheets_client()
+    if not gc:
+        return None
+    try:
+        ss = gc.open_by_key(SHEET_ID)
         try:
-            daily_stocks = get_daily_universe()
-            if daily_stocks:
-                refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
-                break
-            else:
-                log(f"⚠️ get_daily_universe رجع فارغ — محاولة {attempt}/3")
-        except Exception as e:
-            log(f"❌ خطأ في get_daily_universe (محاولة {attempt}/3): {e}")
-            traceback.print_exc()
-            daily_stocks = {}
+            return ss.worksheet(OPEN_TRADES_SHEET)
+        except Exception:
+            headers = [
+                "ticker","strategy","side","order_id",
+                "entry_price","stop_loss","target",
+                "target_tp1","target_tp2","trail_stop","trail_step",
+                "quantity","quantity_remaining","tp1_hit",
+                "peak_price","risk_amount","opened_at"
+            ]
+            ws = ss.add_worksheet(title=OPEN_TRADES_SHEET, rows=100, cols=len(headers))
+            ws.append_row(headers)
+            return ws
+    except Exception as e:
+        print(f"⚠️  فشل جلب Open Trades worksheet: {e}")
+        return None
 
-        if attempt < 3:
-            time.sleep(10)
 
-    if daily_stocks:
+def _save_open_trades(trades: list) -> None:
+    ws = _get_open_trades_ws()
+    if not ws:
+        return
+    try:
+        ws.resize(rows=1)
+        ws.resize(rows=100)
+        for t in trades:
+            opened_at = t.opened_at.isoformat() if hasattr(t.opened_at, "isoformat") else str(t.opened_at)
+            ws.append_row([
+                t.ticker, t.strategy, t.side, t.order_id,
+                t.entry_price, t.stop_loss, t.target,
+                t.target_tp1, t.target_tp2,
+                t.trail_stop, t.trail_step,
+                t.quantity, t.quantity_remaining,
+                str(t.tp1_hit), t.peak_price, t.risk_amount, opened_at
+            ], value_input_option="RAW")
+        print(f"✅ حُفظت {len(trades)} صفقة مفتوحة في Google Sheets")
+    except Exception as e:
+        print(f"⚠️  فشل حفظ الصفقات المفتوحة: {e}")
+
+
+def _delete_open_trades_sheets() -> None:
+    ws = _get_open_trades_ws()
+    if not ws:
+        return
+    try:
+        ws.resize(rows=1)
+        ws.resize(rows=100)
+        print("✅ تم مسح Open Trades من Google Sheets")
+    except Exception as e:
+        print(f"⚠️  فشل مسح Open Trades: {e}")
+
+
+# ─────────────────────────────────────────
+# Closed Trades — Google Sheets
+# ─────────────────────────────────────────
+
+CLOSED_HEADERS = [
+    "date", "ticker", "strategy", "side",
+    "entry_price", "exit_price", "quantity",
+    "stop_loss", "target", "risk_amount",
+    "pnl", "r_achieved", "outcome",
+    "exit_reason", "opened_at", "closed_at",
+]
+
+def _get_closed_trades_ws():
+    gc = _get_sheets_client()
+    if not gc:
+        return None
+    try:
+        ss = gc.open_by_key(SHEET_ID)
         try:
-            notify_pre_market(daily_stocks)
-        except Exception as e:
-            log(f"Telegram error: {e}")
-        log(f"Universe ready: {len(daily_stocks)} stocks selected")
-    else:
-        log("❌ CRITICAL: فشل تحميل الأسهم بعد 3 محاولات")
+            return ss.worksheet(CLOSED_TRADES_SHEET)
+        except Exception:
+            ws = ss.add_worksheet(title=CLOSED_TRADES_SHEET, rows=1000, cols=len(CLOSED_HEADERS))
+            ws.append_row(CLOSED_HEADERS)
+            return ws
+    except Exception as e:
+        print(f"⚠️  فشل جلب Closed Trades worksheet: {e}")
+        return None
+
+
+def save_closed_trade_sheets(record: dict) -> None:
+    """يحفظ صفقة مكتملة في Google Sheets — يُستدعى من reporter.py."""
+    ws = _get_closed_trades_ws()
+    if not ws:
+        return
+    try:
+        from datetime import date
+        row = [
+            date.today().isoformat(),
+            record.get("ticker", ""),
+            record.get("strategy", ""),
+            record.get("side", ""),
+            record.get("entry_price", 0),
+            record.get("exit_price", 0),
+            record.get("quantity", 0),
+            record.get("stop_loss", 0),
+            record.get("target", 0),
+            record.get("risk_amount", 0),
+            record.get("pnl", 0),
+            record.get("r_achieved", 0),
+            record.get("outcome", ""),
+            record.get("exit_reason", ""),
+            record.get("opened_at", ""),
+            record.get("closed_at", ""),
+        ]
+        ws.append_row(row, value_input_option="RAW")
+        print(f"✅ صفقة {record.get('ticker')} حُفظت في Closed Trades Sheets")
+    except Exception as e:
+        print(f"⚠️  فشل حفظ Closed Trade في Sheets: {e}")
+
+
+def load_closed_trades_by_date_sheets(target_date: str) -> list[dict]:
+    """
+    يجلب صفقات يوم معين.
+    يبحث أولاً في 'Closed Trades' الحالي،
+    فإذا لم يجد نتائج يبحث في أرشيف الشهر المقابل (مثلاً 'Archive-2026-03').
+    """
+    gc = _get_sheets_client()
+    if not gc:
+        return []
+    try:
+        ss = gc.open_by_key(SHEET_ID)
+
+        # ── 1. البحث في الشيت الحالي أولاً
         try:
-            from notifier import _send
-            _send(
-                "⚠️ <b>تحذير — فشل تحميل قائمة الأسهم</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "🇬🇧 Failed to load stock universe after 3 attempts.\n"
-                "The system will retry at next pre-market cycle.\n\n"
-                "🇦🇪 فشل تحميل قائمة الأسهم بعد 3 محاولات.\n"
-                "النظام سيحاول مجدداً في الدورة القادمة.\n"
-                "💡 تحقق من Alpaca API أو اضغط /resume لإعادة المحاولة."
-            )
+            ws = ss.worksheet(CLOSED_TRADES_SHEET)
+            rows = ws.get_all_records()
+            results = [r for r in rows if str(r.get("date", "")) == target_date]
+            if results:
+                return results
         except Exception:
             pass
 
-    _pre_market_done = True
-    log("=== PRE-MARKET ROUTINE END ===")
-
-
-# -----------------------------------------
-# مراقبة الصفقات المفتوحة
-# -----------------------------------------
-
-def monitor_open_trades():
-    global open_trades
-
-    if not open_trades:
-        return
-
-    # ── تحقق من التزامن مع Alpaca (يكتشف الإغلاق اليدوي)
-    before = len(open_trades)
-    sync_with_alpaca(open_trades)
-    if len(open_trades) < before:
-        if open_trades:
-            _save_open_trades(open_trades)
-        else:
-            _delete_open_trades_sheets()
-
-    if not open_trades:
-        return
-
-    log(f"Monitoring {len(open_trades)} open trades...")
-    trades_to_remove = []
-
-    for trade in open_trades:
+        # ── 2. البحث في الأرشيف إذا لم نجد في الشيت الحالي
+        month_prefix = target_date[:7]                   # "2026-03"
+        archive_name = f"Archive-{month_prefix}"
         try:
-            # ── تزامن مع Alpaca أولاً (يكتشف TP1 تلقائي + يحدث الكمية)
-            still_open = sync_trade_state_with_alpaca(trade)
-            if not still_open:
-                log(f"  ℹ️  {trade.ticker}: مغلقة في Alpaca — إزالة")
-                trades_to_remove.append(trade)
+            ws_arch = ss.worksheet(archive_name)
+            rows_arch = ws_arch.get_all_records()
+            return [r for r in rows_arch if str(r.get("date", "")) == target_date]
+        except Exception:
+            pass  # شيت الأرشيف غير موجود — طبيعي
+
+        return []
+    except Exception as e:
+        print(f"⚠️  فشل جلب Closed Trades من Sheets: {e}")
+        return []
+
+
+# ─────────────────────────────────────────
+# أرشفة الصفقات الشهرية
+# ─────────────────────────────────────────
+
+def archive_month(year: int, month: int) -> dict:
+    """
+    يؤرشف صفقات شهر كامل من 'Closed Trades' إلى شيت 'Archive-YYYY-MM'.
+
+    الخطوات:
+      1. يجلب كل الصفقات المطابقة للشهر من 'Closed Trades'
+      2. ينشئ (أو يفتح) شيت 'Archive-YYYY-MM' ويكتب البيانات فيه
+      3. يحذف الصفوف المنقولة من 'Closed Trades' بشكل آمن
+
+    يُرجع dict فيه:
+      archived  : عدد الصفقات المنقولة
+      sheet     : اسم شيت الأرشيف
+      skipped   : عدد الصفقات التي فشل نقلها (يبقى في Closed Trades)
+    """
+    from calendar import monthrange
+
+    month_str    = f"{year:04d}-{month:02d}"          # "2026-03"
+    archive_name = f"Archive-{month_str}"
+
+    gc = _get_sheets_client()
+    if not gc:
+        return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": "no sheets client"}
+
+    try:
+        ss = gc.open_by_key(SHEET_ID)
+
+        # ── 1. جلب شيت Closed Trades
+        try:
+            ws_closed = ss.worksheet(CLOSED_TRADES_SHEET)
+        except Exception:
+            return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": "Closed Trades غير موجود"}
+
+        all_rows  = ws_closed.get_all_values()   # قائمة قوائم (بما فيها الـ headers)
+        if not all_rows:
+            return {"archived": 0, "sheet": archive_name, "skipped": 0}
+
+        headers   = all_rows[0]
+        data_rows = all_rows[1:]                 # الصفوف بدون headers
+
+        # ── 2. فصل صفوف الشهر المطلوب عن الباقي
+        month_rows  = []
+        remain_rows = []
+        for row in data_rows:
+            date_val = row[0] if row else ""     # عمود "date" هو الأول
+            if str(date_val).startswith(month_str):
+                month_rows.append(row)
+            else:
+                remain_rows.append(row)
+
+        if not month_rows:
+            print(f"  ℹ️  لا توجد صفقات في {month_str} للأرشفة")
+            return {"archived": 0, "sheet": archive_name, "skipped": 0}
+
+        # ── 3. فتح أو إنشاء شيت الأرشيف
+        try:
+            ws_arch = ss.worksheet(archive_name)
+            # إذا موجود مسبقاً — نتحقق هل فيه headers
+            existing = ws_arch.get_all_values()
+            if not existing:
+                ws_arch.append_row(headers, value_input_option="RAW")
+        except Exception:
+            ws_arch = ss.add_worksheet(
+                title=archive_name,
+                rows=max(500, len(month_rows) + 10),
+                cols=len(headers),
+            )
+            ws_arch.append_row(headers, value_input_option="RAW")
+
+        # ── 4. كتابة صفوف الشهر في الأرشيف دفعة واحدة
+        ws_arch.append_rows(month_rows, value_input_option="RAW")
+        print(f"  ✅ كُتب {len(month_rows)} صفقة في {archive_name}")
+
+        # ── 5. إعادة كتابة Closed Trades بالصفوف المتبقية فقط
+        ws_closed.clear()
+        ws_closed.append_row(headers, value_input_option="RAW")
+        if remain_rows:
+            ws_closed.append_rows(remain_rows, value_input_option="RAW")
+        print(f"  ✅ Closed Trades نُظِّف — تبقّى {len(remain_rows)} صفقة")
+
+        return {
+            "archived": len(month_rows),
+            "sheet":    archive_name,
+            "skipped":  0,
+        }
+
+    except Exception as e:
+        print(f"  ❌ فشل الأرشفة: {e}")
+        return {"archived": 0, "sheet": archive_name, "skipped": 0, "error": str(e)}
+
+
+def load_from_archive(year: int, month: int) -> list[dict]:
+    """
+    يجلب كل صفقات شهر معين من شيت الأرشيف 'Archive-YYYY-MM'.
+    يُستخدم للتحليل التاريخي.
+    """
+    month_str    = f"{year:04d}-{month:02d}"
+    archive_name = f"Archive-{month_str}"
+
+    gc = _get_sheets_client()
+    if not gc:
+        return []
+    try:
+        ss      = gc.open_by_key(SHEET_ID)
+        ws_arch = ss.worksheet(archive_name)
+        rows    = ws_arch.get_all_records()
+        print(f"  ✅ جُلب {len(rows)} صفقة من {archive_name}")
+        return rows
+    except Exception as e:
+        print(f"  ⚠️  {archive_name} غير موجود أو فشل الجلب: {e}")
+        return []
+
+
+def list_available_archives() -> list[str]:
+    """
+    يُرجع قائمة بأسماء شيتات الأرشيف الموجودة في الملف مرتبة تصاعدياً.
+    مثال: ['Archive-2026-01', 'Archive-2026-02', 'Archive-2026-03']
+    """
+    gc = _get_sheets_client()
+    if not gc:
+        return []
+    try:
+        ss     = gc.open_by_key(SHEET_ID)
+        titles = [ws.title for ws in ss.worksheets() if ws.title.startswith("Archive-")]
+        return sorted(titles)
+    except Exception as e:
+        print(f"  ⚠️  فشل جلب قائمة الأرشيفات: {e}")
+        return []
+
+
+def _load_open_trades_from_sheets() -> list:
+    ws = _get_open_trades_ws()
+    if not ws:
+        return []
+    try:
+        rows = ws.get_all_records()
+        if not rows:
+            return []
+        import pytz
+        TZ     = pytz.timezone(os.getenv("TIMEZONE", "America/New_York"))
+        trades = []
+        for d in rows:
+            try:
+                opened_at = datetime.fromisoformat(str(d["opened_at"]))
+                if opened_at.tzinfo is None:
+                    opened_at = TZ.localize(opened_at)
+            except Exception:
+                opened_at = datetime.now(TZ)
+            trade = OpenTrade(
+                ticker=str(d["ticker"]), strategy=str(d.get("strategy","meanrev")),
+                side=str(d["side"]), order_id=str(d.get("order_id","recovered")),
+                entry_price=float(d["entry_price"]), stop_loss=float(d["stop_loss"]),
+                target=float(d["target"]), target_tp1=float(d["target_tp1"]),
+                target_tp2=float(d["target_tp2"]), trail_stop=float(d.get("trail_stop",0)),
+                trail_step=float(d.get("trail_step",0)), quantity=int(d["quantity"]),
+                quantity_remaining=int(d["quantity_remaining"]),
+                tp1_hit=str(d.get("tp1_hit","False"))=="True",
+                peak_price=float(d.get("peak_price", d["entry_price"])),
+                risk_amount=float(d.get("risk_amount",0)),
+            )
+            trades.append(trade)
+            print(f"  📂 استعادة من Sheets: {d['ticker']} [{d['side'].upper()}]"
+                  f" entry=${float(d['entry_price']):.2f}"
+                  f" | SL=${float(d['stop_loss']):.2f}"
+                  f" | TP1=${float(d['target_tp1']):.2f}"
+                  f" | TP2=${float(d['target_tp2']):.2f}")
+        print(f"✅ تم استعادة {len(trades)} صفقة من Google Sheets")
+        return trades
+    except Exception as e:
+        print(f"❌ خطأ في قراءة Open Trades: {e}")
+        return []
+
+
+def get_open_positions() -> list:
+    """
+    يجلب المراكز المفتوحة عند بدء التشغيل:
+    1. أولاً من Google Sheets (بيانات حقيقية)
+    2. إذا فارغ → من Alpaca API (بيانات تقريبية)
+    """
+    alpaca_symbols = set()
+    try:
+        r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            for pos in r.json():
+                alpaca_symbols.add(pos.get("symbol",""))
+    except Exception:
+        pass
+
+    # أولاً: Google Sheets
+    sheets_trades = _load_open_trades_from_sheets()
+    if sheets_trades:
+        valid   = [t for t in sheets_trades if t.ticker in alpaca_symbols]
+        skipped = [t.ticker for t in sheets_trades if t.ticker not in alpaca_symbols]
+        if skipped:
+            print(f"  ⚠️  في Sheets لكن مغلقة في Alpaca: {skipped}")
+        if valid:
+            return valid
+
+    # ثانياً: Alpaca fallback
+    if not alpaca_symbols:
+        print("ℹ️  لا توجد مراكز مفتوحة في Alpaca")
+        return []
+
+    print("ℹ️  لا يوجد بيانات في Sheets — استعادة من Alpaca (مستويات تقريبية)...")
+    try:
+        r      = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+        trades = []
+        for pos in r.json():
+            symbol = pos.get("symbol","")
+            side   = "long" if pos.get("side","long") == "long" else "short"
+            qty    = abs(int(float(pos.get("qty",1))))
+            entry  = float(pos.get("avg_entry_price",0))
+            if not symbol or entry <= 0:
                 continue
-
-            result = monitor_trade(trade)
-            status = result["status"]
-            price  = result["price"]
-            r      = result["r"]
-            side   = trade.side
-
-            if status == "stopped":
-                exit_qty = result.get("exit_qty", trade.quantity)
-                log(f"STOP HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | qty={exit_qty} | tp1_hit={trade.tp1_hit}")
-                place_market_sell(trade.ticker, exit_qty, side=side)
-                pnl = round(
-                    (price - trade.entry_price) * exit_qty if side == "long"
-                    else (trade.entry_price - price) * exit_qty, 2
-                )
-                # إذا كان الوقف بعد TP1 (عند التعادل أو أعلى) — ليست خسارة حقيقية
-                is_real_loss = not trade.tp1_hit and pnl < 0
-                exit_reason_label = "stopped_after_tp1" if trade.tp1_hit else "stopped"
-                record_trade(
-                    ticker=trade.ticker, strategy=trade.strategy,
-                    entry_price=trade.entry_price, exit_price=price,
-                    quantity=exit_qty, stop_loss=trade.stop_loss,
-                    target=trade.target, risk_amount=trade.risk_amount,
-                    exit_reason=exit_reason_label, opened_at=trade.opened_at, side=side,
-                )
-                if is_real_loss:
-                    stopped = risk_manager.record_loss(pnl, r)
-                    try:
-                        notify_trade_loss(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=exit_qty,
-                            loss=abs(pnl), daily_losses=risk_manager.daily_losses,
-                        )
-                        if stopped:
-                            notify_system_stopped()
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
-                else:
-                    # وقف بعد TP1 — ربح أو تعادل، لا تُحتسب خسارة
-                    risk_manager.record_win(max(pnl, 0), r)
-                    try:
-                        from notifier import notify_trade_closed
-                        notify_trade_closed(
-                            ticker=trade.ticker, side=side,
-                            entry_price=trade.entry_price, exit_price=price,
-                            quantity=exit_qty, total_profit=pnl,
-                            r_achieved=r, exit_reason="وقف بعد TP1 — تعادل",
-                        )
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
-                trades_to_remove.append(trade)
-
-            elif status == "tp1_hit":
-                tp1_qty  = result.get("exit_qty", trade.quantity // 2)
-                new_stop = result["new_stop"]
-                log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
-                order_id = place_market_sell(trade.ticker, tp1_qty, side=side)
-
-                if order_id == "ALREADY_CLOSED":
-                    # الصفقة مغلقة بالكامل في Alpaca — نسجّل ونُشعر قبل الإزالة
-                    log(f"  ℹ️  {trade.ticker}: مغلقة بالكامل في Alpaca — تسجيل وإزالة")
-                    pnl_full = round(
-                        (price - trade.entry_price) * trade.quantity if side == "long"
-                        else (trade.entry_price - price) * trade.quantity, 2
-                    )
-                    record_trade(
-                        ticker=trade.ticker, strategy=trade.strategy,
-                        entry_price=trade.entry_price, exit_price=price,
-                        quantity=trade.quantity, stop_loss=trade.stop_loss,
-                        target=trade.target_tp2, risk_amount=trade.risk_amount,
-                        exit_reason="closed_in_alpaca", opened_at=trade.opened_at, side=side,
-                    )
-                    risk_manager.record_win(pnl_full, r)
-                    try:
-                        notify_trade_win(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=trade.quantity,
-                            profit=pnl_full, r_achieved=r,
-                        )
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
-                    trades_to_remove.append(trade)
-                elif order_id:
-                    pnl_tp1 = round(
-                        (price - trade.entry_price) * tp1_qty if side == "long"
-                        else (trade.entry_price - price) * tp1_qty, 2
-                    )
-                    record_trade(
-                        ticker=trade.ticker, strategy=trade.strategy,
-                        entry_price=trade.entry_price, exit_price=price,
-                        quantity=tp1_qty, stop_loss=trade.stop_loss,
-                        target=trade.target_tp1, risk_amount=trade.risk_amount / 2,
-                        exit_reason="tp1", opened_at=trade.opened_at, side=side,
-                    )
-                    risk_manager.record_win(pnl_tp1, r)
-                    try:
-                        from notifier import notify_tp1_hit
-                        notify_tp1_hit(
-                            ticker=trade.ticker,
-                            side=side,
-                            entry_price=trade.entry_price,
-                            tp1_price=price,
-                            qty_tp1=tp1_qty,
-                            profit_tp1=pnl_tp1,
-                            r_achieved=r,
-                            qty_remaining=trade.quantity - tp1_qty,
-                            tp2_price=trade.target_tp2,
-                        )
-                    except Exception as e:
-                        log(f"Telegram error: {e}")
-                    trade.tp1_hit            = True
-                    trade.stop_loss          = new_stop
-                    trade.quantity_remaining = trade.quantity - tp1_qty  # تحديث الكمية المتبقية
-                    update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحريك الـ SL في Alpaca فوراً
-                    _save_open_trades(open_trades)  # حفظ فوري بعد TP1
-                else:
-                    log(f"  ⚠️  فشل TP1 لـ {trade.ticker} — سيُعاد المحاولة في الدورة القادمة")
-
-            elif status == "target":
-                exit_qty = result.get("exit_qty", trade.quantity_remaining if trade.tp1_hit else trade.quantity)
-                label    = "TP2" if trade.tp1_hit else "TARGET"
-                log(f"{label}: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f}")
-                place_market_sell(trade.ticker, exit_qty, side=side)
-                pnl = round(
-                    (price - trade.entry_price) * exit_qty if side == "long"
-                    else (trade.entry_price - price) * exit_qty, 2
-                )
-                record_trade(
-                    ticker=trade.ticker, strategy=trade.strategy,
-                    entry_price=trade.entry_price, exit_price=price,
-                    quantity=exit_qty, stop_loss=trade.stop_loss,
-                    target=trade.target, risk_amount=trade.risk_amount,
-                    exit_reason="target", opened_at=trade.opened_at, side=side,
-                )
-                risk_manager.record_win(pnl, r)
-                try:
-                    if trade.tp1_hit:
-                        from notifier import notify_tp2_hit
-                        # حساب ربح TP1 من السجلات أو تقدير
-                        pnl_tp1_est = round(
-                            (trade.target_tp1 - trade.entry_price) * (trade.quantity // 2) if side == "long"
-                            else (trade.entry_price - trade.target_tp1) * (trade.quantity // 2), 2
-                        )
-                        notify_tp2_hit(
-                            ticker=trade.ticker,
-                            side=side,
-                            entry_price=trade.entry_price,
-                            tp2_price=price,
-                            qty_tp2=exit_qty,
-                            profit_tp2=pnl,
-                            r_achieved=r,
-                            profit_tp1=pnl_tp1_est,
-                            total_profit=round(pnl + pnl_tp1_est, 2),
-                        )
-                    else:
-                        notify_trade_win(
-                            ticker=trade.ticker, entry_price=trade.entry_price,
-                            exit_price=price, quantity=exit_qty,
-                            profit=pnl, r_achieved=r,
-                        )
-                except Exception as e:
-                    log(f"Telegram error: {e}")
-                trades_to_remove.append(trade)
-
-            elif status == "trail_updated":
-                new_stop = result["new_stop"]
-                log(f"TRAIL: {trade.ticker} stop ${trade.stop_loss:.2f} -> ${new_stop:.2f}")
-                try:
-                    notify_stop_updated(
-                        ticker=trade.ticker, old_stop=trade.stop_loss,
-                        new_stop=new_stop, current_price=price,
-                    )
-                except Exception as e:
-                    log(f"Telegram error: {e}")
-                trade.stop_loss = new_stop
-                update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحديث حقيقي في Alpaca
-                _save_open_trades(open_trades)
-
+            if side == "long":
+                stop,tp1,tp2 = round(entry*.95,2), round(entry*1.02,2), round(entry*1.04,2)
             else:
-                tp_info = (
-                    f"TP1 done -> TP2 @ ${trade.target_tp2:.2f}" if trade.tp1_hit
-                    else f"waiting TP1 @ ${trade.target_tp1:.2f}"
-                )
-                log(f"OPEN: {trade.ticker} [{side.upper()}] ${price:.2f} | R={r:.2f} | {tp_info}")
+                stop,tp1,tp2 = round(entry*1.05,2), round(entry*.98,2), round(entry*.96,2)
+            tp1_qty = max(1, qty//2)
+            trades.append(OpenTrade(
+                ticker=symbol, strategy="meanrev", side=side,
+                order_id="recovered", entry_price=entry,
+                stop_loss=stop, target=tp2, target_tp1=tp1, target_tp2=tp2,
+                trail_stop=0.0, trail_step=0.0, quantity=qty,
+                quantity_remaining=qty-tp1_qty, tp1_hit=False,
+                peak_price=entry, risk_amount=0.0,
+            ))
+            print(f"  ♻️  {symbol} [{side.upper()}] qty={qty} entry=${entry:.2f} ⚠️ تقريبي")
+        if trades:
+            print(f"✅ تم استعادة {len(trades)} مركز من Alpaca")
+        return trades
+    except Exception as e:
+        print(f"❌ خطأ في جلب المراكز: {e}")
+        return []
 
-        except Exception as e:
-            log(f"Error monitoring {trade.ticker}: {e}")
-            traceback.print_exc()
 
-    for trade in trades_to_remove:
-        open_trades.remove(trade)
+def sync_with_alpaca(open_trades: list) -> list:
+    """يكتشف الصفقات المغلقة يدوياً في Alpaca ويحذفها من القائمة."""
+    if not open_trades:
+        return open_trades
+    try:
+        r = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return open_trades
+        alpaca_symbols = {pos.get("symbol","") for pos in r.json()}
+        removed = []
+        for trade in open_trades[:]:
+            if trade.ticker not in alpaca_symbols:
+                open_trades.remove(trade)
+                removed.append(trade.ticker)
+                print(f"  ⚠️  {trade.ticker} أُغلقت يدوياً — تم حذفها من المراقبة")
+        if removed:
+            print(f"🔄 Sync: حُذف {len(removed)} صفقة: {removed}")
+    except Exception as e:
+        print(f"⚠️  فشل Sync مع Alpaca: {e}")
+    return open_trades
 
-    if trades_to_remove:
-        if open_trades:
-            _save_open_trades(open_trades)
+
+def get_current_price(ticker: str) -> float:
+    """يجلب آخر سعر للسهم — snapshot API."""
+    try:
+        response = requests.get(
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/snapshot",
+            headers=HEADERS,
+            params={"feed": "iex"},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data  = response.json()
+            price = float(
+                (data.get("latestTrade") or {}).get("p") or
+                (data.get("latestQuote") or {}).get("ap") or
+                (data.get("dailyBar")    or {}).get("c") or 0
+            )
+            if price > 0:
+                return round(price, 2)
+    except Exception as e:
+        print(f"❌ خطأ في جلب سعر {ticker}: {e}")
+    return 0.0
+
+HEADERS = {
+    "APCA-API-KEY-ID":     ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    "Content-Type":        "application/json",
+}
+
+
+# ─────────────────────────────────────────
+# نموذج الصفقة المفتوحة
+# ─────────────────────────────────────────
+
+@dataclass
+class OpenTrade:
+    ticker:              str
+    strategy:            str       # 'meanrev'
+    side:                str       # 'long' أو 'short'
+    order_id:            str
+    entry_price:         float
+    stop_loss:           float
+    target:              float     # TP2 — الهدف النهائي
+    target_tp1:          float     # TP1 = 1R (50% من الكمية)
+    target_tp2:          float     # TP2 = 3R (50% من الكمية)
+    trail_stop:          float
+    trail_step:          float
+    quantity:            int       # الكمية الكلية
+    quantity_remaining:  int       # الكمية المتبقية بعد TP1
+    tp1_hit:             bool      # هل تحقق TP1 بالفعل؟
+    peak_price:          float     # أعلى سعر بعد الدخول (LONG) أو أدنى سعر (SHORT)
+    risk_amount:         float
+    opened_at:           datetime  = None
+
+    def __post_init__(self):
+        if self.opened_at is None:
+            self.opened_at = datetime.utcnow()
+        # تهيئة peak_price بسعر الدخول
+        if self.peak_price == 0.0:
+            self.peak_price = self.entry_price
+
+
+# ─────────────────────────────────────────
+# 1. جلب معلومات الحساب
+# ─────────────────────────────────────────
+
+def get_account() -> dict:
+    """يجلب معلومات حساب Alpaca."""
+    try:
+        response = requests.get(
+            f"{ALPACA_BASE_URL}/v2/account",
+            headers=HEADERS,
+            timeout=10,
+        )
+
+        data = response.json()
+
+        return {
+            "balance":        float(data.get("equity", 0)),
+            "buying_power":   float(data.get("buying_power", 0)),
+            "cash":           float(data.get("cash", 0)),
+            "shorting_enabled": data.get("shorting_enabled", False),
+            "status":         data.get("status", "unknown"),
+        }
+
+    except Exception as e:
+        print(f"❌ خطأ في جلب معلومات الحساب: {e}")
+        return {}
+
+
+
+# ─────────────────────────────────────────
+# 2. التحقق من السوق
+# ─────────────────────────────────────────
+
+def is_market_open() -> bool:
+    """يتحقق إذا كان السوق مفتوحاً الآن عبر Alpaca Clock API."""
+    try:
+        response = requests.get(
+            f"{ALPACA_BASE_URL}/v2/clock",
+            headers=HEADERS,
+            timeout=10,
+        )
+        return response.json().get("is_open", False)
+    except Exception as e:
+        print(f"❌ خطأ في التحقق من السوق: {e}")
+        return False
+
+
+def get_next_market_open() -> str:
+    """يُرجع وقت افتتاح السوق القادم."""
+    try:
+        response = requests.get(
+            f"{ALPACA_BASE_URL}/v2/clock",
+            headers=HEADERS,
+            timeout=10,
+        )
+        return response.json().get("next_open", "غير متاح")
+    except Exception:
+        return "غير متاح"
+
+
+# ─────────────────────────────────────────
+# 3. تنفيذ الأوامر
+# ─────────────────────────────────────────
+
+def place_bracket_order(
+    ticker:      str,
+    quantity:    int,
+    entry_price: float,
+    stop_loss:   float,
+    target:      float,
+    side:        str = "long",
+) -> Optional[str]:
+    """
+    يُنفّذ Bracket Order — أمر دخول مع وقف خسارة وهدف.
+    يدعم LONG (buy) وSHORT (sell).
+    يُرجع order_id إذا نجح، None إذا فشل.
+    """
+    order_side = "buy" if side == "long" else "sell"
+
+    # LONG:  limit_price أعلى قليلاً من السعر (نضمن التنفيذ)
+    # SHORT: limit_price أقل قليلاً من السعر
+    if side == "long":
+        limit_price = round(entry_price * 1.001, 2)
+    else:
+        limit_price = round(entry_price * 0.999, 2)
+
+    order = {
+        "symbol":        ticker,
+        "qty":           str(quantity),
+        "side":          order_side,
+        "type":          "limit",
+        "limit_price":   str(limit_price),
+        "time_in_force": "day",
+        "order_class":   "bracket",
+        "stop_loss": {
+            "stop_price": str(round(stop_loss, 2)),
+        },
+        "take_profit": {
+            "limit_price": str(round(target, 2)),
+        },
+    }
+
+    try:
+        response = requests.post(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            json=order,
+            timeout=15,
+        )
+        data = response.json()
+
+        if response.status_code in (200, 201):
+            order_id = data.get("id", "")
+            label    = "شراء" if side == "long" else "بيع على المكشوف"
+            print(f"✅ أمر {label} {ticker} تم — ID: {order_id[:8]}...")
+            return order_id
         else:
-            _delete_open_trades_sheets()
+            error_msg = data.get("message", "خطأ غير معروف")
+            print(f"❌ فشل أمر {ticker}: {error_msg}")
 
-
-# -----------------------------------------
-# تحديث Universe كل ساعة أثناء السوق
-# -----------------------------------------
-
-def refresh_universe_if_needed():
-    global daily_stocks, last_universe_refresh
-    now  = get_ny_time()
-    mins = (now - last_universe_refresh).total_seconds() / 60
-    if mins < UNIVERSE_REFRESH_MIN:
-        return
-    try:
-        log("🔄 تحديث قائمة الأسهم (كل ساعة)...")
-        new_stocks = get_daily_universe()
-        if new_stocks:
-            daily_stocks = new_stocks
-            refresh_allowed_tickers(candidate_tickers=list(daily_stocks.keys()))
-            last_universe_refresh = now
-            log(f"✅ تم تحديث القائمة: {len(daily_stocks)} سهم")
-        else:
-            log("⚠️ فشل تحديث القائمة — نبقى على القائمة الحالية")
-    except Exception as e:
-        log(f"❌ خطأ في تحديث Universe: {e}")
-
-
-# -----------------------------------------
-# البحث عن إشارات جديدة
-# -----------------------------------------
-
-def scan_for_signals():
-    global open_trades, last_no_opp, last_scan
-
-    if len(open_trades) >= MAX_TOTAL:
-        return
-
-    # ── تحقق من الفترة الزمنية — لا تفحص أكثر من مرة كل 5 دقائق
-    now  = get_ny_time()
-    mins = (now - last_scan).total_seconds() / 60
-    if mins < SCAN_INTERVAL_MIN:
-        return
-
-    try:
-        last_scan = now  # ← تحديث وقت آخر فحص
-        account = get_account()
-        if not account:
-            log("Could not fetch account -- skipping scan")
-            return
-
-        current_positions = {t.ticker: (t.side, t.strategy) for t in open_trades}
-        balance           = account["balance"]
-        results           = run_selector(daily_stocks, current_positions=current_positions)
-        found_signal      = False
-
-        for signal in results.get("meanrev", []):
-            if not risk_manager.can_trade():
-                break
-            # تحديد الاستراتيجية من الـ reason
-            strategy = "momentum" if "MOM" in signal.reason else "meanrev"
-            trade = open_meanrev_trade(signal, balance, strategy=strategy)
-            if trade:
-                open_trades.append(trade)
-                _save_open_trades(open_trades)
-                found_signal = True
+            # ── إشعار Telegram عند خطأ PDT
+            if "pattern day trading" in error_msg.lower():
                 try:
-                    notify_trade_open(
-                        ticker=signal.ticker,
-                        strategy="Mean Reversion",
-                        side="BUY" if signal.side == "long" else "SELL SHORT",
-                        price=signal.entry_price,
-                        quantity=trade.quantity,
-                        stop_loss=signal.stop_loss,
-                        target=signal.target_tp2,
-                        risk_amount=trade.risk_amount,
+                    from notifier import _send
+                    side_ar  = "شراء 🟢" if side == "long" else "بيع 🔴"
+                    _send(
+                        f"⛔ <b>تعذّر فتح الصفقة — قيود PDT</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n\n"
+                        f"🇬🇧 <b>English</b>\n"
+                        f"🔒 Trade blocked by Pattern Day Trading rule.\n"
+                        f"📌 {ticker} | {side_ar} | entry=${entry_price:.2f}\n"
+                        f"💡 Solution: Raise account balance above $25,000.\n\n"
+                        f"🇦🇪 <b>العربية</b>\n"
+                        f"🔒 تم حجب الصفقة بسبب قاعدة PDT.\n"
+                        f"📌 {ticker} | {side_ar} | دخول=${entry_price:.2f}\n"
+                        f"💡 الحل: ارفع رصيد الحساب فوق $25,000."
                     )
-                except Exception as e:
-                    log(f"Telegram error: {e}")
+                except Exception:
+                    pass
 
-        if not found_signal:
-            now  = get_ny_time()
-            diff = (now - last_no_opp).total_seconds() / 60
-            if diff >= NO_OPPORTUNITY_INTERVAL:
-                try:
-                    notify_no_opportunity()
-                except Exception as e:
-                    log(f"Telegram error: {e}")
-                last_no_opp = now
-                log("No opportunity -- notification sent")
+            return None
 
     except Exception as e:
-        log(f"Error in scan_for_signals: {e}")
-        traceback.print_exc()
+        print(f"❌ خطأ في تنفيذ أمر {ticker}: {e}")
+        return None
 
 
-# -----------------------------------------
-# روتين إغلاق السوق
-# -----------------------------------------
+def place_market_sell(ticker: str, quantity: int, side: str = "long") -> Optional[str]:
+    """
+    يُغلق الصفقة بسعر السوق فوراً.
+    LONG  → sell  (بيع الأسهم المحتفظ بها)
+    SHORT → buy   (إعادة شراء الأسهم المقترضة)
+    """
+    close_side = "sell" if side == "long" else "buy"
 
-def run_market_close():
-    global open_trades, _close_done
-
-    if _close_done:
-        return
-
-    log("=== MARKET CLOSE ROUTINE START ===")
-    _close_done = True
+    order = {
+        "symbol":        ticker,
+        "qty":           str(quantity),
+        "side":          close_side,
+        "type":          "market",
+        "time_in_force": "day",
+    }
 
     try:
-        # ── الصفقات المفتوحة تنتقل لليوم التالي — لا نغلقها
-        open_trades_summary = []
-        if open_trades:
-            log(f"{len(open_trades)} open trade(s) will carry over to next session:")
-            for trade in open_trades:
-                price = get_current_price(trade.ticker)
-                if price > 0 and trade.stop_loss != trade.entry_price:
-                    if trade.side == "long":
-                        r = round((price - trade.entry_price) / abs(trade.entry_price - trade.stop_loss), 2)
-                    else:
-                        r = round((trade.entry_price - price) / abs(trade.entry_price - trade.stop_loss), 2)
-                else:
-                    r = 0.0
-                open_trades_summary.append({
-                    "ticker": trade.ticker,
-                    "side":   trade.side,
-                    "entry":  trade.entry_price,
-                    "r":      r,
-                })
-                log(f"  → {trade.ticker} [{trade.side.upper()}] entry=${trade.entry_price:.2f} | R={r:+.2f}")
+        response = requests.post(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            json=order,
+            timeout=15,
+        )
+        data = response.json()
 
-        account = get_account()
-        balance = account.get("balance", 0) if account else 0
-        send_daily_report(balance, open_trades=open_trades_summary)
-        log("Daily report sent")
+        if response.status_code in (200, 201):
+            order_id = data.get("id", "")
+            label    = "إغلاق LONG" if side == "long" else "تغطية SHORT"
+            print(f"✅ أمر {label} {ticker} تم — ID: {order_id[:8]}...")
+            return order_id
+        else:
+            print(f"❌ فشل إغلاق {ticker}: {data.get('message', 'خطأ غير معروف')}")
+            return None
 
     except Exception as e:
-        log(f"Error in run_market_close: {e}")
-        traceback.print_exc()
-
-    log("=== MARKET CLOSE ROUTINE END ===")
+        print(f"❌ خطأ في إغلاق {ticker}: {e}")
+        return None
 
 
-# -----------------------------------------
-# الحلقة الرئيسية
-# -----------------------------------------
-
-def main():
-    global _consecutive_errors, _error_notified
-    global _pre_market_done, _pre_alert_done, _close_done
-
-    log("=" * 55)
-    log("BBAI Trading System -- Starting")
-    log("Mean Reversion + SHORT Selling")
-    log("Commands: /maintenance /resume /status /help")
-    log("=" * 55)
-
-    # الاتصال بـ Alpaca
-    log("Connecting to Alpaca...")
-    while True:
+def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: int = 2) -> bool:
+    """
+    يحدّث وقف الخسارة الحقيقي في Alpaca — يلغي القديم ويضع جديد.
+    - Retry ×2 مع تأخير 1.5 ثانية بينهما
+    - إشعار Telegram عند الفشل النهائي
+    """
+    for attempt in range(1, max_retries + 1):
         try:
-            account = get_account()
-            if account and account.get("balance", 0) > 0:
-                log(f"Connected | Balance: ${account['balance']:,.2f}")
-                log(f"Next open: {get_next_market_open()}")
-                log(f"Timezone: {TIMEZONE} | Loop: 30s")
-                log("-" * 55)
-                break
+            # ── 1. جلب الأوامر المفتوحة لهذا السهم
+            r = requests.get(
+                f"{ALPACA_BASE_URL}/v2/orders",
+                headers=HEADERS,
+                params={"status": "open", "symbols": ticker, "limit": 50},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"GET orders failed: {r.status_code}")
+
+            # ── 2. حذف كل الـ stop orders المرتبطة (legs + standalone)
+            for o in r.json():
+                legs = o.get("legs") or []
+                for leg in legs:
+                    if leg.get("type") == "stop":
+                        del_r = requests.delete(
+                            f"{ALPACA_BASE_URL}/v2/orders/{leg['id']}",
+                            headers=HEADERS, timeout=10,
+                        )
+                        if del_r.status_code not in (200, 204):
+                            print(f"  ⚠️  فشل حذف stop leg {leg['id']}: {del_r.status_code}")
+                if o.get("type") == "stop":
+                    del_r = requests.delete(
+                        f"{ALPACA_BASE_URL}/v2/orders/{o['id']}",
+                        headers=HEADERS, timeout=10,
+                    )
+                    if del_r.status_code not in (200, 204):
+                        print(f"  ⚠️  فشل حذف stop order {o['id']}: {del_r.status_code}")
+
+            # ── 3. جلب الكمية الفعلية من Alpaca
+            r2 = requests.get(
+                f"{ALPACA_BASE_URL}/v2/positions/{ticker}",
+                headers=HEADERS, timeout=10,
+            )
+            if r2.status_code != 200:
+                raise RuntimeError(f"GET position failed: {r2.status_code}")
+            actual_qty = abs(int(float(r2.json().get("qty", 0))))
+            if actual_qty == 0:
+                print(f"  ℹ️  {ticker}: لا يوجد مركز مفتوح — تخطي تحديث الـ stop")
+                return False
+
+            # ── 4. وضع stop جديد
+            stop_side = "sell" if side == "long" else "buy"
+            order = {
+                "symbol":        ticker,
+                "qty":           str(actual_qty),
+                "side":          stop_side,
+                "type":          "stop",
+                "stop_price":    str(round(new_stop, 2)),
+                "time_in_force": "day",
+            }
+            resp = requests.post(
+                f"{ALPACA_BASE_URL}/v2/orders",
+                headers=HEADERS, json=order, timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                print(f"  ✅ Stop حقيقي في Alpaca: {ticker} @ ${new_stop:.2f} (qty={actual_qty})")
+                return True
             else:
-                log("Connection failed -- retrying in 60s...")
-        except Exception as e:
-            log(f"Connection error: {e} -- retrying in 60s...")
-        time.sleep(60)
-
-    # بدء الاستماع لأوامر Telegram في الخلفية
-    start_command_listener(get_system_context)
-    log("Telegram command listener started -- send /help for commands")
-    log("-" * 55)
-
-    # ── استعادة الصفقات المفتوحة (من Sheets أولاً، ثم Alpaca)
-    log("Checking for open positions...")
-    recovered = get_open_positions()
-    if recovered:
-        open_trades.extend(recovered)
-        log(f"Recovered {len(recovered)} open position(s) -- will monitor them")
-    log("-" * 55)
-
-    # الحلقة الرئيسية
-    while True:
-        try:
-            # إذا كان في وضع الصيانة
-            if system_state.maintenance_mode:
-                log("MAINTENANCE MODE -- trading paused")
-                time.sleep(30)
-                continue
-
-            # التشغيل الطبيعي
-            check_new_day()
-            t = get_ny_time().strftime("%H:%M")
-
-            if is_pre_market_alert_time() and not _pre_alert_done:
-                run_pre_market_alert()
-
-            elif is_pre_market_time() and not _pre_market_done:
-                run_pre_market()
-
-            elif is_market_hours():
-                if not risk_manager.can_trade():
-                    log("System paused -- daily loss limit reached")
-                elif not daily_stocks and not _pre_market_done:
-                    if system_state.maintenance_mode:
-                        log("MAINTENANCE MODE -- waiting for /resume before pre-market")
-                    else:
-                        log("Started during market hours -- running pre-market now...")
-                        run_pre_market()
-                elif daily_stocks:
-                    monitor_open_trades()
-                    refresh_universe_if_needed()
-                    scan_for_signals()
-                elif _pre_market_done and not daily_stocks:
-                    # فشل تحميل الأسهم سابقاً — نعيد المحاولة كل 5 دقائق
-                    log("⚠️ Universe فارغ — إعادة المحاولة...")
-                    _pre_market_done = False  # يسمح بإعادة run_pre_market
-                else:
-                    log("No universe -- waiting for pre-market routine")
-
-            elif is_close_time() and not _close_done:
-                run_market_close()
-
-            else:
-                day_str = "Weekend" if not is_weekday() else "After hours"
-                log(f"{day_str} | {t} {TIMEZONE} | Next open: {get_next_market_open()}")
-
-            # إعادة ضبط عداد الأخطاء عند نجاح الدورة
-            if _consecutive_errors > 0:
-                _consecutive_errors = 0
-                if _error_notified:
-                    notify_error("", is_resolved=True)
-                    _error_notified = False
-
-        except KeyboardInterrupt:
-            log("Manual shutdown")
-            break
+                raise RuntimeError(f"POST order failed: {resp.json().get('message', resp.status_code)}")
 
         except Exception as e:
-            _consecutive_errors += 1
-            log(f"Error #{_consecutive_errors}: {e}")
-            traceback.print_exc()
+            print(f"  ⚠️  update_stop_in_alpaca محاولة {attempt}/{max_retries} — {ticker}: {e}")
+            if attempt < max_retries:
+                time.sleep(1.5)
 
-            # إرسال إشعار Telegram بعد 3 أخطاء متتالية فقط
-            if _consecutive_errors >= 3 and not _error_notified:
-                notify_error(str(e))
-                _error_notified = True
+    # ── فشل نهائي بعد كل المحاولات — إشعار Telegram
+    print(f"  ❌ فشل تحديث Stop في Alpaca نهائياً: {ticker} @ ${new_stop:.2f}")
+    try:
+        from notifier import _send
+        _send(
+            f"⚠️ <b>فشل تحديث Stop — {ticker}</b>\n"
+            f"🕐 تعذّر تحريك الوقف إلى ${new_stop:.2f} بعد {max_retries} محاولات.\n"
+            f"راجع الصفقة يدوياً في Alpaca."
+        )
+    except Exception:
+        pass
+    return False
 
-        time.sleep(30)
+
+def _check_stop_not_at_breakeven(ticker: str, breakeven: float, side: str) -> bool:
+    """
+    يتحقق إذا كان الـ stop الحالي في Alpaca لم يصل للـ breakeven بعد.
+    يُرجع True إذا يحتاج تحديث، False إذا هو بالفعل عند breakeven أو أفضل.
+    """
+    try:
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/orders",
+            headers=HEADERS,
+            params={"status": "open", "symbols": ticker, "limit": 50},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return False  # لا نعرف — لا تتدخل
+        for o in r.json():
+            # فحص standalone stop orders
+            if o.get("type") == "stop":
+                current_stop = float(o.get("stop_price") or 0)
+                if side == "long" and current_stop < breakeven - 0.01:
+                    return True   # الـ stop لا يزال أقل من breakeven
+                if side == "short" and current_stop > breakeven + 0.01:
+                    return True
+            # فحص legs داخل bracket
+            for leg in (o.get("legs") or []):
+                if leg.get("type") == "stop":
+                    current_stop = float(leg.get("stop_price") or 0)
+                    if side == "long" and current_stop < breakeven - 0.01:
+                        return True
+                    if side == "short" and current_stop > breakeven + 0.01:
+                        return True
+        return False  # كل الـ stops عند breakeven أو أفضل
+    except Exception as e:
+        print(f"  ⚠️  _check_stop_not_at_breakeven {ticker}: {e}")
+        return False
 
 
-if __name__ == "__main__":
-    main()
+def sync_trade_state_with_alpaca(trade) -> bool:
+    """
+    أهم دالة — تُشغَّل قبل كل دورة مراقبة:
+    - تكتشف TP1 تلقائياً إذا أغلق Alpaca النصف بنفسه
+    - تحدّث quantity_remaining
+    - تحرّك SL إلى breakeven في Alpaca فعلياً
+    """
+    try:
+        r = requests.get(f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}", headers=HEADERS, timeout=10)
+        if r.status_code == 404:
+            return False  # الصفقة مغلقة بالكامل
+        if r.status_code != 200:
+            return True   # خطأ مؤقت — لا تغيّر شيء
+
+        actual_qty = abs(int(float(r.json().get("qty", 0))))
+
+        if actual_qty == 0:
+            return False  # مغلقة
+
+        # ── اكتشاف TP1 تلقائي (Alpaca أغلق النصف)
+        expected_full = trade.quantity
+        half_qty      = max(1, expected_full // 2)
+
+        if actual_qty <= half_qty and not trade.tp1_hit:
+            price = get_current_price(trade.ticker)
+            closed_qty = expected_full - actual_qty
+            trade.tp1_hit            = True
+            trade.quantity_remaining = actual_qty
+            old_stop                 = trade.stop_loss
+            trade.stop_loss          = trade.entry_price  # breakeven
+
+            # تحريك الـ Stop الحقيقي في Alpaca
+            update_stop_in_alpaca(trade.ticker, trade.entry_price, trade.side)
+
+            profit = round(
+                (price - trade.entry_price) * closed_qty if trade.side == "long"
+                else (trade.entry_price - price) * closed_qty, 2
+            )
+            r_ach = round(
+                abs(price - trade.entry_price) / max(abs(trade.entry_price - old_stop), 0.01), 2
+            )
+            print(f"  ✅ TP1 AUTO: {trade.ticker} | qty أغلق={closed_qty} | profit=${profit:.2f} | SL→breakeven")
+            try:
+                from notifier import notify_trade_win, notify_stop_updated
+                notify_trade_win(
+                    ticker=trade.ticker, entry_price=trade.entry_price,
+                    exit_price=price, quantity=closed_qty,
+                    profit=profit, r_achieved=r_ach,
+                )
+                notify_stop_updated(
+                    ticker=trade.ticker, old_stop=old_stop,
+                    new_stop=trade.entry_price, current_price=price,
+                )
+            except Exception as e:
+                print(f"  Telegram error: {e}")
+            _save_open_trades([trade])
+            return True
+
+        # ── تحديث الكمية إذا تغيرت بدون TP1 (مثلاً إغلاق جزئي يدوي)
+        if trade.tp1_hit and actual_qty != trade.quantity_remaining:
+            trade.quantity_remaining = actual_qty
+            _save_open_trades([trade])
+
+        # ── تحقق: إذا tp1_hit لكن الـ stop في Alpaca لم يتحرك بعد للـ breakeven
+        # يحدث لما main.py اكتشف TP1 لكن update_stop_in_alpaca فشلت أو السيرفر restart
+        if trade.tp1_hit and trade.stop_loss == trade.entry_price:
+            stop_needs_update = _check_stop_not_at_breakeven(trade.ticker, trade.entry_price, trade.side)
+            if stop_needs_update:
+                print(f"  🔄 sync: {trade.ticker} tp1_hit لكن stop لم يتحرك في Alpaca — إعادة التحديث")
+                update_stop_in_alpaca(trade.ticker, trade.entry_price, trade.side)
+
+        return True
+    except Exception as e:
+        print(f"  ⚠️  sync error {trade.ticker}: {e}")
+        return True  # لا توقف المراقبة بسبب خطأ مؤقت
+
+
+def cancel_order(order_id: str) -> bool:
+    """يلغي أمراً معلقاً."""
+    try:
+        response = requests.delete(
+            f"{ALPACA_BASE_URL}/v2/orders/{order_id}",
+            headers=HEADERS,
+            timeout=10,
+        )
+        return response.status_code in (200, 204)
+    except Exception as e:
+        print(f"❌ خطأ في إلغاء الأمر: {e}")
+        return False
+
+
+# ─────────────────────────────────────────
+# 4. فتح الصفقات
+# ─────────────────────────────────────────
+
+def open_meanrev_trade(
+    signal:   MeanRevSignal,
+    balance:  float,
+    strategy: str = "meanrev",
+) -> Optional[OpenTrade]:
+    """
+    يفتح صفقة LONG أو SHORT مع خروج مزدوج TP1/TP2.
+    strategy: 'meanrev' أو 'momentum'
+
+    يفتح أمرين منفصلين في Alpaca:
+    - أمر 1 (tp1_qty): bracket مع TP1 و SL
+    - أمر 2 (tp2_qty): bracket مع TP2 و SL
+    هذا يضمن حماية الـ 50% الثانية حتى لو توقف السيرفر.
+    """
+    account      = get_account()
+    balance      = account.get("balance", balance) if account else balance
+    buying_power = account.get("buying_power", 0) if account else 0
+
+    sizing = calculate_position_size(
+        balance=balance,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        use_leverage=True,
+        buying_power=buying_power,
+    )
+
+    total_qty = sizing["quantity"]
+    tp1_qty   = max(1, total_qty // 2)
+    tp2_qty   = total_qty - tp1_qty
+
+    side_label     = "🟢 LONG" if signal.side == "long" else "🔴 SHORT"
+    quality        = getattr(signal, "signal_quality", "standard").upper()
+    strategy_label = "زخم" if strategy == "momentum" else "ارتداد"
+
+    print(f"\n📤 فتح صفقة {strategy_label} — {signal.ticker} {side_label} [{quality}]")
+    print(f"   الكمية الكلية : {total_qty}")
+    print(f"   TP1 ({tp1_qty} سهم) : ${signal.target_tp1:.2f} (1R) — يدوي")
+    print(f"   TP2 ({tp2_qty} سهم) : ${signal.target_tp2:.2f} (3R) — Alpaca")
+    print(f"   وقف الخسارة   : ${signal.stop_loss:.2f}")
+    print(f"   المخاطرة       : ${sizing['risk_amount']} | رافعة ×{sizing['leverage']}")
+
+    # ── براكيت واحد للكامل (TP2 + SL) — TP1 يُكتشف تلقائياً
+    order_id = place_bracket_order(
+        ticker=signal.ticker,
+        quantity=total_qty,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        target=signal.target_tp2,
+        side=signal.side,
+    )
+    if not order_id:
+        return None
+
+    print(f"   ✅ Bracket (qty={total_qty} | TP2=${signal.target_tp2:.2f} | SL=${signal.stop_loss:.2f}) — ID: {order_id[:8]}...")
+
+    return OpenTrade(
+        ticker=signal.ticker,
+        strategy=strategy,
+        side=signal.side,
+        order_id=order_id,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        target=signal.target_tp2,
+        target_tp1=signal.target_tp1,
+        target_tp2=signal.target_tp2,
+        trail_stop=0.0,
+        trail_step=signal.trail_step,
+        quantity=total_qty,
+        quantity_remaining=total_qty,  # كامل — يتحدث عند اكتشاف TP1
+        tp1_hit=False,
+        peak_price=signal.entry_price,
+        risk_amount=sizing["risk_amount"],
+    )
+
+
+# ─────────────────────────────────────────
+# 5. مراقبة الصفقات المفتوحة
+# ─────────────────────────────────────────
+
+def monitor_trade(trade: OpenTrade) -> dict:
+    """
+    يراقب الصفقة المفتوحة ويتحقق من:
+    - هل ضُرب وقف الخسارة؟
+    - هل تحقق TP1 (خروج جزئي 50%)?
+    - هل تحقق TP2 (خروج نهائي 50%)?
+    - هل يجب تحريك الوقف المتحرك؟
+
+    يُرجع dict:
+    - status   : 'open' | 'stopped' | 'tp1_hit' | 'target' | 'trail_updated'
+    - price    : السعر الحالي
+    - r        : نسبة R الحالية
+    - new_stop : الوقف الجديد عند التحديث
+    - exit_qty : الكمية المراد إغلاقها
+    """
+    current_price = get_current_price(trade.ticker)
+    if current_price <= 0:
+        return {"status": "open", "price": 0, "r": 0,
+                "new_stop": trade.stop_loss, "exit_qty": 0}
+
+    r_current = calculate_r(trade.entry_price, current_price, trade.stop_loss, trade.side)
+
+    # تحديث peak_price
+    if trade.side == "long":
+        trade.peak_price = max(trade.peak_price, current_price)
+    else:
+        trade.peak_price = min(trade.peak_price, current_price)
+
+    # ── ضُرب وقف الخسارة
+    stop_hit = (
+        (trade.side == "long"  and current_price <= trade.stop_loss) or
+        (trade.side == "short" and current_price >= trade.stop_loss)
+    )
+    if stop_hit:
+        exit_qty = trade.quantity_remaining if trade.tp1_hit else trade.quantity
+        return {"status": "stopped", "price": current_price,
+                "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
+
+    # ── TP1 (الهدف الأول = 1R) — خروج جزئي 50%
+    tp1_hit = (
+        (trade.side == "long"  and not trade.tp1_hit and current_price >= trade.target_tp1) or
+        (trade.side == "short" and not trade.tp1_hit and current_price <= trade.target_tp1)
+    )
+    if tp1_hit:
+        tp1_qty  = trade.quantity // 2  # نصف الكمية الأصلية دائماً
+        new_stop = trade.entry_price  # نقل الوقف إلى نقطة التعادل
+        return {"status": "tp1_hit", "price": current_price,
+                "r": r_current, "new_stop": new_stop, "exit_qty": tp1_qty}
+
+    # ── TP2 (الهدف النهائي = 3R) — خروج كامل للكمية المتبقية
+    tp2_hit = (
+        (trade.side == "long"  and current_price >= trade.target_tp2) or
+        (trade.side == "short" and current_price <= trade.target_tp2)
+    )
+    if tp2_hit:
+        exit_qty = trade.quantity_remaining if trade.tp1_hit else trade.quantity
+        return {"status": "target", "price": current_price,
+                "r": r_current, "new_stop": trade.stop_loss, "exit_qty": exit_qty}
+
+    # ── Trailing Stop (يُفعَّل بعد TP1 للـ LONG والـ SHORT)
+    if trade.tp1_hit and trade.trail_step > 0:
+        if trade.side == "long":
+            new_stop = update_trailing_stop(current_price, trade.stop_loss, trade.trail_step)
+            if new_stop > trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+        elif trade.side == "short":
+            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
+            new_stop = trade.stop_loss - trade.trail_step
+            if current_price < trade.stop_loss - trade.trail_step:
+                new_stop = current_price + trade.trail_step
+                if new_stop < trade.stop_loss:
+                    return {"status": "trail_updated", "price": current_price,
+                            "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+
+    return {"status": "open", "price": current_price,
+            "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
+
+
+def close_all_positions() -> bool:
+    """يُغلق كل المراكز المفتوحة دفعة واحدة — يُستخدم عند نهاية الجلسة."""
+    try:
+        response = requests.delete(
+            f"{ALPACA_BASE_URL}/v2/positions",
+            headers=HEADERS,
+            timeout=15,
+        )
+        success = response.status_code in (200, 204, 207)
+        if success:
+            print("✅ تم إغلاق كل المراكز المفتوحة")
+        return success
+    except Exception as e:
+        print(f"❌ خطأ في إغلاق المراكز: {e}")
+        return False
