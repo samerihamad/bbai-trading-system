@@ -513,16 +513,16 @@ def scan_for_signals():
         try:
             from executor import ALPACA_BASE_URL, HEADERS
             import requests as _req
-            pos_r = _req.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=8)
-            if pos_r.status_code == 200:
-                for pos in pos_r.json():
-                    sym = pos.get("symbol", "")
-                    if sym and sym not in current_positions:
-                        alpaca_side = "long" if pos.get("side") == "long" else "short"
-                        current_positions[sym] = (alpaca_side, "unknown")
-                        log(f"  ⚠️  {sym} موجود في Alpaca لكن ليس في الذاكرة — مستثنى من الفحص")
+            _pos_r = _req.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=8)
+            if _pos_r.status_code == 200:
+                for _pos in _pos_r.json():
+                    _sym = _pos.get("symbol", "")
+                    if _sym and _sym not in current_positions:
+                        _alpaca_side = "long" if _pos.get("side") == "long" else "short"
+                        current_positions[_sym] = (_alpaca_side, "unknown")
+                        log(f"  ⚠️  {_sym} موجود في Alpaca لكن ليس في الذاكرة — مستثنى من الفحص")
         except Exception as _e:
-            log(f"  ⚠️  تعذّر جلب positions من Alpaca للفحص: {_e}")
+            log(f"  ⚠️  تعذّر جلب positions من Alpaca: {_e}")
         balance           = account["balance"]
         results           = run_selector(daily_stocks, current_positions=current_positions)
         found_signal      = False
@@ -540,13 +540,18 @@ def scan_for_signals():
                 try:
                     notify_trade_open(
                         ticker=signal.ticker,
-                        strategy="Mean Reversion",
+                        strategy="Mean Reversion" if strategy == "meanrev" else "Momentum",
                         side="BUY" if signal.side == "long" else "SELL SHORT",
                         price=signal.entry_price,
                         quantity=trade.quantity,
                         stop_loss=signal.stop_loss,
                         target=signal.target_tp2,
                         risk_amount=trade.risk_amount,
+                        target_tp1=signal.target_tp1,
+                        target_tp2=signal.target_tp2,
+                        qty_tp1=trade.quantity // 2,
+                        qty_tp2=trade.quantity - trade.quantity // 2,
+                        trade_number=len(open_trades),
                     )
                 except Exception as e:
                     log(f"Telegram error: {e}")
