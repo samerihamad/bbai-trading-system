@@ -289,12 +289,18 @@ def sync_with_alpaca(open_trades: list) -> list:
     يكتشف الصفقات المغلقة يدوياً في Alpaca ويحذفها من القائمة.
 
     حماية من الحذف الخاطئ:
-    - يستخدم retry ×2 قبل الحكم بالإغلاق
-    - يرفض أي رد فارغ [] إذا كان عندنا صفقات مفتوحة
-    - يتحقق من كل صفقة منفردة قبل حذفها (تحقق مزدوج)
+    1. Grace period: أي صفقة فُتحت منذ أقل من 3 دقائق لا تُلمس
+       (bracket order قد يظل pending قبل أن يُنفَّذ ويظهر في positions)
+    2. Retry ×2 قبل الحكم بالإغلاق
+    3. تحقق مزدوج: أي صفقة غائبة تُتحقق منها مباشرة قبل الحذف
+    4. رفض قائمة فارغة [] إذا كان عندنا صفقات مفتوحة
     """
     if not open_trades:
         return open_trades
+
+    import pytz
+    from datetime import datetime, timezone, timedelta
+    GRACE_SECONDS = 180  # 3 دقائق — وقت كافٍ لأي bracket order أن يُنفَّذ
 
     # ── جلب positions من Alpaca مع retry ×2
     alpaca_symbols = None
@@ -311,48 +317,60 @@ def sync_with_alpaca(open_trades: list) -> list:
 
             positions = r.json()
 
-            # ── حماية: إذا Alpaca أرجع قائمة فارغة لكن عندنا صفقات — شك في الرد
+            # حماية: Alpaca أرجع [] لكن عندنا صفقات — شك في الرد
             if len(positions) == 0 and len(open_trades) > 0:
                 print(f"  ⚠️  sync_with_alpaca: Alpaca أرجع [] لكن عندنا {len(open_trades)} صفقة — تجاهل (محاولة {attempt}/2)")
                 time.sleep(1.5)
                 continue
 
             alpaca_symbols = {pos.get("symbol", "") for pos in positions}
-            break  # رد صحيح — نخرج من الـ retry
+            break
 
         except Exception as e:
             print(f"  ⚠️  sync_with_alpaca محاولة {attempt}/2: {e}")
             time.sleep(1)
 
-    # ── إذا فشلت كل المحاولات أو الرد مشكوك فيه — لا نحذف شيئاً
     if alpaca_symbols is None:
         print("  ⚠️  sync_with_alpaca: تعذّر الحصول على positions موثوق — لا تغيير")
         return open_trades
 
-    # ── تحقق مزدوج: أي صفقة غائبة عن Alpaca نتحقق منها مرة ثانية قبل الحذف
+    # ── فحص كل صفقة
+    now_utc = datetime.now(timezone.utc)
     removed = []
     for trade in open_trades[:]:
-        if trade.ticker not in alpaca_symbols:
-            # تحقق مباشر من هذا السهم تحديداً
-            try:
-                r2 = requests.get(
-                    f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}",
-                    headers=HEADERS, timeout=8,
-                )
-                if r2.status_code == 200:
-                    # لا يزال موجوداً — كان خطأ في القائمة العامة
-                    print(f"  ✅ {trade.ticker}: موجود في Alpaca (تحقق مزدوج) — لا حذف")
+        if trade.ticker in alpaca_symbols:
+            continue  # موجودة — لا شيء
+
+        # ── Grace period: تجاهل الصفقات الجديدة جداً
+        try:
+            opened = trade.opened_at
+            if opened is not None:
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=timezone.utc)
+                age_seconds = (now_utc - opened).total_seconds()
+                if age_seconds < GRACE_SECONDS:
+                    print(f"  ⏳ {trade.ticker}: غائبة عن Alpaca لكن فُتحت منذ {age_seconds:.0f}s — grace period ({GRACE_SECONDS}s)")
                     continue
-                elif r2.status_code == 404:
-                    # مؤكد مغلق
-                    open_trades.remove(trade)
-                    removed.append(trade.ticker)
-                    print(f"  ⚠️  {trade.ticker}: مغلقة في Alpaca (404 مؤكد) — حُذفت من المراقبة")
-                else:
-                    # رد غير واضح — لا نحذف
-                    print(f"  ⚠️  {trade.ticker}: HTTP {r2.status_code} في التحقق المزدوج — لا حذف")
-            except Exception as e2:
-                print(f"  ⚠️  {trade.ticker}: فشل التحقق المزدوج ({e2}) — لا حذف")
+        except Exception:
+            pass  # إذا فشل حساب الوقت — لا نحذف
+
+        # ── تحقق مزدوج: هل هي مغلقة فعلاً؟
+        try:
+            r2 = requests.get(
+                f"{ALPACA_BASE_URL}/v2/positions/{trade.ticker}",
+                headers=HEADERS, timeout=8,
+            )
+            if r2.status_code == 200:
+                print(f"  ✅ {trade.ticker}: موجودة في Alpaca (تحقق مزدوج) — لا حذف")
+                continue
+            elif r2.status_code == 404:
+                open_trades.remove(trade)
+                removed.append(trade.ticker)
+                print(f"  ⚠️  {trade.ticker}: مغلقة في Alpaca (404 مؤكد) — حُذفت من المراقبة")
+            else:
+                print(f"  ⚠️  {trade.ticker}: HTTP {r2.status_code} في التحقق المزدوج — لا حذف")
+        except Exception as e2:
+            print(f"  ⚠️  {trade.ticker}: فشل التحقق المزدوج ({e2}) — لا حذف")
 
     if removed:
         print(f"🔄 Sync: حُذف {len(removed)} صفقة مؤكدة: {removed}")
@@ -545,7 +563,7 @@ def place_bracket_order(
                     pass
                 return None
     except Exception:
-        pass  # فشل التحقق — نكمل ونحاول
+        pass  # فشل التحقق — نكمل
 
     try:
         response = requests.post(
@@ -564,7 +582,6 @@ def place_bracket_order(
         else:
             error_msg = data.get("message", "خطأ غير معروف")
             print(f"❌ فشل أمر {ticker}: {error_msg}")
-
             try:
                 from notifier import _send
                 side_ar = "شراء 🟢" if side == "long" else "بيع 🔴"
@@ -589,7 +606,6 @@ def place_bracket_order(
                     )
             except Exception:
                 pass
-
             return None
 
     except Exception as e:
