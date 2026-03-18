@@ -71,26 +71,87 @@ def _get_open_trades_ws():
         return None
 
 
+def _trade_to_row(t) -> list:
+    """يحوّل كائن OpenTrade إلى صف لـ Google Sheets."""
+    opened_at = t.opened_at.isoformat() if hasattr(t.opened_at, "isoformat") else str(t.opened_at)
+    return [
+        t.ticker, t.strategy, t.side, t.order_id,
+        t.entry_price, t.stop_loss, t.target,
+        t.target_tp1, t.target_tp2,
+        t.trail_stop, t.trail_step,
+        t.quantity, t.quantity_remaining,
+        str(t.tp1_hit), t.peak_price, t.risk_amount, opened_at
+    ]
+
+
 def _save_open_trades(trades: list) -> None:
+    """
+    يحفظ كل الصفقات المفتوحة في Google Sheets (كتابة كاملة).
+    - يمسح كل البيانات القديمة ويكتب الجديدة دفعة واحدة (batch)
+    - يتحقق من عدم وجود تكرار في الـ ticker
+    - يُستخدم عند: فتح صفقة جديدة، إغلاق صفقة، بدء التشغيل
+    ⚠️ لا يُستخدم لتحديث صفقة واحدة — استخدم _update_trade_in_sheets() بدلاً منها
+    """
     ws = _get_open_trades_ws()
     if not ws:
         return
     try:
-        ws.resize(rows=1)
-        ws.resize(rows=100)
+        # ── حماية من التكرار: ticker فريد
+        seen_tickers = set()
+        unique_trades = []
         for t in trades:
-            opened_at = t.opened_at.isoformat() if hasattr(t.opened_at, "isoformat") else str(t.opened_at)
-            ws.append_row([
-                t.ticker, t.strategy, t.side, t.order_id,
-                t.entry_price, t.stop_loss, t.target,
-                t.target_tp1, t.target_tp2,
-                t.trail_stop, t.trail_step,
-                t.quantity, t.quantity_remaining,
-                str(t.tp1_hit), t.peak_price, t.risk_amount, opened_at
-            ], value_input_option="RAW")
-        print(f"✅ حُفظت {len(trades)} صفقة مفتوحة في Google Sheets")
+            if t.ticker not in seen_tickers:
+                seen_tickers.add(t.ticker)
+                unique_trades.append(t)
+            else:
+                print(f"  ⚠️  _save_open_trades: تكرار {t.ticker} — تخطي النسخة المكررة")
+
+        # ── بناء كل الصفوف دفعة واحدة
+        all_rows = [_trade_to_row(t) for t in unique_trades]
+
+        # ── مسح البيانات القديمة (يحتفظ بالـ headers في صف 1)
+        ws.resize(rows=1)
+        ws.resize(rows=max(len(all_rows) + 5, 20))
+
+        # ── كتابة دفعة واحدة (batch) بدلاً من append_row فردي
+        if all_rows:
+            # نكتب من الصف 2 (بعد الـ headers)
+            cell_range = f"A2:{chr(64 + len(all_rows[0]))}{len(all_rows) + 1}"
+            ws.update(cell_range, all_rows, value_input_option="RAW")
+
+        print(f"✅ حُفظت {len(unique_trades)} صفقة مفتوحة في Google Sheets (batch)")
     except Exception as e:
         print(f"⚠️  فشل حفظ الصفقات المفتوحة: {e}")
+
+
+def _update_trade_in_sheets(trade) -> None:
+    """
+    يحدّث صفقة واحدة في Google Sheets بدون مسح الباقي.
+    يبحث عن الصف بالـ ticker ويحدّثه في مكانه.
+    إذا لم يجده — يضيفه كصف جديد.
+    ⚠️ أهم من _save_open_trades — يُستخدم في sync وtrailing
+    """
+    ws = _get_open_trades_ws()
+    if not ws:
+        return
+    try:
+        rows = ws.get_all_records()
+        row_data = _trade_to_row(trade)
+
+        # ── البحث عن الصف بالـ ticker
+        for idx, r in enumerate(rows, start=2):  # start=2 لأن صف 1 = headers
+            if str(r.get("ticker", "")) == trade.ticker:
+                # تحديث الصف الموجود
+                cell_range = f"A{idx}:Q{idx}"
+                ws.update(cell_range, [row_data], value_input_option="RAW")
+                print(f"  ✅ Sheets: تحديث {trade.ticker} (صف {idx})")
+                return
+
+        # ── الصف غير موجود — إضافة جديدة
+        ws.append_row(row_data, value_input_option="RAW")
+        print(f"  ✅ Sheets: إضافة {trade.ticker} (صف جديد)")
+    except Exception as e:
+        print(f"  ⚠️  فشل تحديث {trade.ticker} في Sheets: {e}")
 
 
 def _delete_open_trades_sheets() -> None:
@@ -225,7 +286,8 @@ def get_open_positions() -> list:
     """
     يجلب المراكز المفتوحة عند بدء التشغيل:
     1. أولاً من Google Sheets (بيانات حقيقية)
-    2. إذا فارغ → من Alpaca API (بيانات تقريبية)
+    2. يتحقق من وجودها في Alpaca — يحذف الغير موجودة من Sheets
+    3. إذا فارغ → من Alpaca API (بيانات تقريبية)
     """
     alpaca_symbols = set()
     try:
@@ -243,6 +305,13 @@ def get_open_positions() -> list:
         skipped = [t.ticker for t in sheets_trades if t.ticker not in alpaca_symbols]
         if skipped:
             print(f"  ⚠️  في Sheets لكن مغلقة في Alpaca: {skipped}")
+            # ── تنظيف: حفظ الصفقات الصالحة فقط في Sheets (حذف القديمة)
+            if valid:
+                _save_open_trades(valid)
+                print(f"  🧹 تم تنظيف Sheets: {len(valid)} صالحة، {len(skipped)} حُذفت")
+            else:
+                _delete_open_trades_sheets()
+                print(f"  🧹 تم مسح كل Open Trades من Sheets (كلها مغلقة في Alpaca)")
         if valid:
             return valid
 
@@ -277,7 +346,8 @@ def get_open_positions() -> list:
             ))
             print(f"  ♻️  {symbol} [{side.upper()}] qty={qty} entry=${entry:.2f} ⚠️ تقريبي")
         if trades:
-            print(f"✅ تم استعادة {len(trades)} مركز من Alpaca")
+            _save_open_trades(trades)  # حفظ فوري في Sheets
+            print(f"✅ تم استعادة {len(trades)} مركز من Alpaca وحفظها في Sheets")
         return trades
     except Exception as e:
         print(f"❌ خطأ في جلب المراكز: {e}")
@@ -875,13 +945,13 @@ def sync_trade_state_with_alpaca(trade) -> bool:
                 )
             except Exception as e:
                 print(f"  Telegram error: {e}")
-            _save_open_trades([trade])
+            _update_trade_in_sheets(trade)
             return True
 
         # ── تحديث الكمية إذا تغيرت بدون TP1 (مثلاً إغلاق جزئي يدوي)
         if trade.tp1_hit and actual_qty != trade.quantity_remaining:
             trade.quantity_remaining = actual_qty
-            _save_open_trades([trade])
+            _update_trade_in_sheets(trade)
 
         # ── تحقق: إذا tp1_hit لكن الـ stop في Alpaca لم يتحرك بعد للـ breakeven
         # يحدث لما main.py اكتشف TP1 لكن update_stop_in_alpaca فشلت أو السيرفر restart
