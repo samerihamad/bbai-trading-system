@@ -34,8 +34,8 @@ def calculate_position_size(
 
     يُرجع dict يحتوي:
     - quantity    : عدد الأسهم
-    - risk_amount : المبلغ المخاطر به بالدولار
-    - risk_pct    : نسبة المخاطرة
+    - risk_amount : المبلغ المخاطر به بالدولار (الفعلي = risk_per_share × quantity)
+    - risk_pct    : نسبة المخاطرة الفعلية من الرصيد
     - leverage    : الرافعة المستخدمة
     """
     if entry_price <= 0 or stop_loss <= 0:
@@ -48,9 +48,9 @@ def calculate_position_size(
     # ── نسبة المخاطرة: ديناميكية إذا مُررت، وإلا الافتراضي من config
     effective_risk = risk_override if risk_override is not None else RISK_PER_TRADE
 
-    leverage    = STRATEGY2_LEVERAGE if use_leverage else 1.0
-    risk_amount = balance * effective_risk
-    quantity    = int((risk_amount * leverage) / risk_per_share)
+    leverage      = STRATEGY2_LEVERAGE if use_leverage else 1.0
+    target_risk   = balance * effective_risk   # المبلغ المستهدف للمخاطرة (بدون رافعة)
+    quantity      = int((target_risk * leverage) / risk_per_share)
 
     if quantity <= 0:
         quantity = 1
@@ -75,10 +75,14 @@ def calculate_position_size(
             print(f"⚠️  تحديد الكمية بـ {max_by_position} (حد {MAX_POSITION_PCT*100:.0f}% من الرصيد=${balance*MAX_POSITION_PCT:,.0f}) بدلاً من {quantity}")
             quantity = max_by_position
 
+    # ── حساب المخاطرة الفعلية بعد كل التعديلات (الكمية النهائية × مسافة الوقف)
+    actual_risk     = round(risk_per_share * quantity, 2)
+    actual_risk_pct = round(actual_risk / balance * 100, 1) if balance > 0 else 0.0
+
     return {
         "quantity":    quantity,
-        "risk_amount": round(risk_amount, 2),
-        "risk_pct":    round(effective_risk * 100, 1),
+        "risk_amount": actual_risk,
+        "risk_pct":    actual_risk_pct,
         "leverage":    leverage,
     }
 
