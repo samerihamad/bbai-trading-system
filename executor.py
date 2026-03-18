@@ -962,6 +962,22 @@ def sync_trade_state_with_alpaca(trade) -> bool:
         half_qty      = max(1, expected_full // 2)
 
         if actual_qty <= half_qty and not trade.tp1_hit:
+            # ── حماية من Partial Fill: تأكد أن أمر الدخول نُفّذ بالكامل أولاً
+            # بدون هذا الفحص، partial fill (50 من 266) يُفسَّر خطأً كـ TP1
+            if trade.order_id and trade.order_id not in ("recovered",):
+                order_status, filled_qty = _get_order_filled_qty(trade.order_id)
+                if order_status in ("partially_filled", "new", "accepted", "pending_new"):
+                    # الأمر لم يكتمل بعد — هذا partial fill وليس TP1
+                    if filled_qty > 0 and filled_qty != trade.quantity:
+                        old_qty = trade.quantity
+                        trade.quantity           = filled_qty
+                        trade.quantity_remaining = filled_qty
+                        _update_trade_in_sheets(trade)
+                        print(f"  ⚠️  {trade.ticker}: Partial Fill ({filled_qty}/{old_qty}) — تحديث الكمية، ليس TP1")
+                    else:
+                        print(f"  ⏳ {trade.ticker}: أمر الدخول لم يكتمل ({order_status}) — تخطي TP1 detection")
+                    return True  # لا تفعل شيء — انتظر حتى يكتمل
+
             price = get_current_price(trade.ticker)
             closed_qty = expected_full - actual_qty
             trade.tp1_hit            = True
@@ -1046,6 +1062,28 @@ def cancel_order(order_id: str) -> bool:
         return False
 
 
+def _get_order_filled_qty(order_id: str) -> tuple:
+    """
+    يتحقق من حالة الأمر ويُرجع (status, filled_qty).
+    status: 'filled' | 'partially_filled' | 'new' | 'canceled' | 'error' | ...
+    filled_qty: عدد الأسهم المنفّذة فعلاً
+    يُستخدم لاكتشاف Partial Fill ومنع الخلط مع TP1.
+    """
+    try:
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/v2/orders/{order_id}",
+            headers=HEADERS, timeout=10,
+        )
+        if r.status_code == 200:
+            data   = r.json()
+            status = data.get("status", "unknown")
+            filled = int(float(data.get("filled_qty", 0)))
+            return status, filled
+        return "error", 0
+    except Exception:
+        return "error", 0
+
+
 # ─────────────────────────────────────────
 # 4. فتح الصفقات
 # ─────────────────────────────────────────
@@ -1108,7 +1146,36 @@ def open_meanrev_trade(
     if not order_id:
         return None
 
-    print(f"   ✅ Bracket (qty={total_qty} | TP2=${signal.target_tp2:.2f} | SL=${signal.stop_loss:.2f}) — ID: {order_id[:8]}...")
+    # ── التحقق من الكمية المنفّذة فعلاً (حماية من Partial Fill)
+    time.sleep(3)  # انتظار قصير للتنفيذ
+    order_status, filled_qty = _get_order_filled_qty(order_id)
+
+    if order_status in ("canceled", "expired", "rejected"):
+        print(f"   ❌ أمر {signal.ticker} أُلغي/رُفض ({order_status}) — لا صفقة")
+        return None
+
+    if filled_qty == 0 and order_status in ("new", "accepted", "pending_new"):
+        # الأمر لم يُنفّذ بعد — ننتظر 5 ثوانٍ إضافية
+        print(f"   ⏳ أمر {signal.ticker} لم يُنفّذ بعد — انتظار إضافي...")
+        time.sleep(5)
+        order_status, filled_qty = _get_order_filled_qty(order_id)
+
+    if filled_qty == 0:
+        # لم يُنفّذ بالكامل بعد 8 ثوانٍ — نلغي ونتخطى
+        print(f"   ❌ أمر {signal.ticker} لم يُنفّذ (filled=0) — إلغاء")
+        cancel_order(order_id)
+        return None
+
+    # ── استخدام الكمية المنفّذة فعلاً (تحمي من partial fill)
+    actual_qty = filled_qty if filled_qty > 0 else total_qty
+    if actual_qty < total_qty:
+        print(f"   ⚠️  Partial Fill: {actual_qty}/{total_qty} سهم فقط — استخدام الكمية الفعلية")
+
+    # ── إعادة حساب risk_amount بالكمية الفعلية
+    risk_per_share   = abs(signal.entry_price - signal.stop_loss)
+    actual_risk      = round(risk_per_share * actual_qty, 2)
+
+    print(f"   ✅ Bracket (qty={actual_qty} | TP2=${signal.target_tp2:.2f} | SL=${signal.stop_loss:.2f}) — ID: {order_id[:8]}...")
 
     return OpenTrade(
         ticker=signal.ticker,
@@ -1122,11 +1189,11 @@ def open_meanrev_trade(
         target_tp2=signal.target_tp2,
         trail_stop=0.0,
         trail_step=signal.trail_step,
-        quantity=total_qty,
-        quantity_remaining=total_qty,  # كامل — يتحدث عند اكتشاف TP1
+        quantity=actual_qty,
+        quantity_remaining=actual_qty,
         tp1_hit=False,
         peak_price=signal.entry_price,
-        risk_amount=sizing["risk_amount"],
+        risk_amount=actual_risk,
     )
 
 
