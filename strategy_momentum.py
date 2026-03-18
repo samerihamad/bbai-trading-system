@@ -169,26 +169,6 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return round(float(atr) if not pd.isna(atr) else 0.0, 4)
 
 
-def get_current_atr(ticker: str, timeframe: str = "15Min") -> float:
-    """
-    يجلب ATR الحالي للـ Momentum strategy — يُستخدم في Trailing Stop الديناميكي.
-    يستخدم fetch_15min_bars (timeframe='15Min') أو fetch_daily_bars (timeframe='1Day').
-    يرجع 0.0 عند الفشل (safe fallback).
-    """
-    try:
-        if timeframe in ("15Min", "15min", "15m"):
-            df = fetch_15min_bars(ticker, bars=30)
-        else:
-            df = fetch_daily_bars(ticker, days=10)
-        if df is None or df.empty or len(df) < 15:
-            return 0.0
-        atr = calc_atr(df)
-        return atr if atr > 0 else 0.0
-    except Exception as e:
-        print(f"  ⚠️  [MOM] فشل جلب ATR الديناميكي لـ {ticker}: {e}")
-        return 0.0
-
-
 def calc_vwap(df: pd.DataFrame) -> float:
     """VWAP تراكمي من بداية الجلسة."""
     typical = (df["high"] + df["low"] + df["close"]) / 3
