@@ -35,6 +35,7 @@ from executor         import (
     place_market_sell,
     close_all_positions,
     _save_open_trades,
+    _update_trade_in_sheets,
     _delete_open_trades_sheets,
     OpenTrade,
 )
@@ -383,7 +384,7 @@ def monitor_open_trades():
                     trade.stop_loss          = new_stop
                     trade.quantity_remaining = trade.quantity - tp1_qty  # تحديث الكمية المتبقية
                     update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحريك الـ SL في Alpaca فوراً
-                    _save_open_trades(open_trades)  # حفظ فوري بعد TP1
+                    _update_trade_in_sheets(trade)  # تحديث صفقة واحدة بدون مسح الباقي
                 else:
                     log(f"  ⚠️  فشل TP1 لـ {trade.ticker} — سيُعاد المحاولة في الدورة القادمة")
 
@@ -445,7 +446,7 @@ def monitor_open_trades():
                     log(f"Telegram error: {e}")
                 trade.stop_loss = new_stop
                 update_stop_in_alpaca(trade.ticker, new_stop, trade.side)  # تحديث حقيقي في Alpaca
-                _save_open_trades(open_trades)
+                _update_trade_in_sheets(trade)  # تحديث صفقة واحدة بدون مسح الباقي
 
             else:
                 tp_info = (
