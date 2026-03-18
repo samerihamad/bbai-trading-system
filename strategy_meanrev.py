@@ -140,22 +140,6 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return round(float(atr) if not pd.isna(atr) else 0.0, 4)
 
 
-def get_current_atr(ticker: str, timeframe: str = "15Min") -> float:
-    """
-    يجلب ATR الحالي (ديناميكي) أثناء التشغيل لاستخدامه في الـ Trailing Stop.
-    يُستخدم بدلاً من ATR المحفوظ عند الفتح لأن التقلب يتغير خلال اليوم.
-    يرجع 0.0 عند الفشل (safe fallback).
-    """
-    try:
-        df = fetch_bars(ticker, timeframe=timeframe, days=5)
-        if df is None or df.empty or len(df) < 15:
-            return 0.0
-        atr = calc_atr(df)
-        return atr if atr > 0 else 0.0
-    except Exception as e:
-        print(f"  ⚠️  فشل جلب ATR الديناميكي لـ {ticker}: {e}")
-        return 0.0
-
 def calc_vwap(df: pd.DataFrame) -> float:
     typical = (df["high"] + df["low"] + df["close"]) / 3
     vwap    = (typical * df["volume"]).sum() / df["volume"].sum()
