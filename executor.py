@@ -17,7 +17,7 @@ from config import (
     ALPACA_DATA_URL,
 )
 from strategy_meanrev import MeanRevSignal, update_trailing_stop
-from risk import calculate_position_size, calculate_r
+from risk import calculate_position_size, calculate_r, dynamic_risk_pct
 
 # ─────────────────────────────────────────
 # Google Sheets — حفظ الصفقات المفتوحة
@@ -654,13 +654,18 @@ def place_market_sell(ticker: str, quantity: int, side: str = "long") -> Optiona
 
 def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: int = 2) -> bool:
     """
-    يحدّث وقف الخسارة الحقيقي في Alpaca — يلغي القديم ويضع جديد.
-    - Retry ×2 مع تأخير 1.5 ثانية بينهما
-    - إشعار Telegram عند الفشل النهائي
+    يحدّث وقف الخسارة الحقيقي في Alpaca:
+    1. يلغي كل الأوامر المعلّقة للسهم (stops + take_profits + bracket legs)
+    2. يجلب الكمية الفعلية من position
+    3. يضع stop جديد بالكمية الصحيحة
+
+    ملاحظة: إلغاء كل الأوامر آمن لأن:
+    - TP2 يُراقب يدوياً بالكود في monitor_trade()
+    - Stop الجديد يُوضع بالكمية الفعلية (يحل مشكلة bracket legs بكمية خاطئة)
     """
     for attempt in range(1, max_retries + 1):
         try:
-            # ── 1. جلب الأوامر المفتوحة لهذا السهم
+            # ── 1. جلب كل الأوامر المفتوحة لهذا السهم
             r = requests.get(
                 f"{ALPACA_BASE_URL}/v2/orders",
                 headers=HEADERS,
@@ -670,24 +675,27 @@ def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: 
             if r.status_code != 200:
                 raise RuntimeError(f"GET orders failed: {r.status_code}")
 
-            # ── 2. حذف كل الـ stop orders المرتبطة (legs + standalone)
+            # ── 2. إلغاء كل الأوامر المعلّقة (نظيف — بدلاً من محاولة حذف legs فردية)
+            cancelled_count = 0
             for o in r.json():
-                legs = o.get("legs") or []
-                for leg in legs:
-                    if leg.get("type") == "stop":
-                        del_r = requests.delete(
-                            f"{ALPACA_BASE_URL}/v2/orders/{leg['id']}",
-                            headers=HEADERS, timeout=10,
-                        )
-                        if del_r.status_code not in (200, 204):
-                            print(f"  ⚠️  فشل حذف stop leg {leg['id']}: {del_r.status_code}")
-                if o.get("type") == "stop":
-                    del_r = requests.delete(
-                        f"{ALPACA_BASE_URL}/v2/orders/{o['id']}",
-                        headers=HEADERS, timeout=10,
-                    )
-                    if del_r.status_code not in (200, 204):
-                        print(f"  ⚠️  فشل حذف stop order {o['id']}: {del_r.status_code}")
+                order_id = o.get("id", "")
+                if not order_id:
+                    continue
+                del_r = requests.delete(
+                    f"{ALPACA_BASE_URL}/v2/orders/{order_id}",
+                    headers=HEADERS, timeout=10,
+                )
+                if del_r.status_code in (200, 204):
+                    cancelled_count += 1
+                elif del_r.status_code == 422:
+                    # 422 = الأمر غير قابل للإلغاء (ربما نُفّذ أو أُلغي مسبقاً) — تخطي
+                    pass
+                else:
+                    print(f"  ⚠️  فشل إلغاء أمر {order_id[:8]}: HTTP {del_r.status_code}")
+
+            if cancelled_count > 0:
+                print(f"  🔄 {ticker}: أُلغي {cancelled_count} أمر معلّق")
+                time.sleep(0.5)  # انتظر حتى تُعالَج الإلغاءات
 
             # ── 3. جلب الكمية الفعلية من Alpaca
             r2 = requests.get(
@@ -701,7 +709,7 @@ def update_stop_in_alpaca(ticker: str, new_stop: float, side: str, max_retries: 
                 print(f"  ℹ️  {ticker}: لا يوجد مركز مفتوح — تخطي تحديث الـ stop")
                 return False
 
-            # ── 4. وضع stop جديد
+            # ── 4. وضع stop جديد بالكمية الصحيحة
             stop_side = "sell" if side == "long" else "buy"
             order = {
                 "symbol":        ticker,
@@ -837,12 +845,29 @@ def sync_trade_state_with_alpaca(trade) -> bool:
                 abs(price - trade.entry_price) / max(abs(trade.entry_price - old_stop), 0.01), 2
             )
             print(f"  ✅ TP1 AUTO: {trade.ticker} | qty أغلق={closed_qty} | profit=${profit:.2f} | SL→breakeven")
+
+            # ── تسجيل TP1 في Closed Trades (كان مفقوداً — يمنع ضياع السجل)
             try:
-                from notifier import notify_trade_win, notify_stop_updated
-                notify_trade_win(
-                    ticker=trade.ticker, entry_price=trade.entry_price,
-                    exit_price=price, quantity=closed_qty,
-                    profit=profit, r_achieved=r_ach,
+                from reporter import record_trade as _record_trade
+                _record_trade(
+                    ticker=trade.ticker, strategy=trade.strategy,
+                    entry_price=trade.entry_price, exit_price=price,
+                    quantity=closed_qty, stop_loss=old_stop,
+                    target=trade.target_tp1, risk_amount=trade.risk_amount / 2,
+                    exit_reason="tp1_auto", opened_at=trade.opened_at,
+                    side=trade.side,
+                )
+            except Exception as e:
+                print(f"  ⚠️  فشل تسجيل TP1 AUTO: {e}")
+
+            try:
+                from notifier import notify_tp1_hit, notify_stop_updated
+                notify_tp1_hit(
+                    ticker=trade.ticker, side=trade.side,
+                    entry_price=trade.entry_price, tp1_price=price,
+                    qty_tp1=closed_qty, profit_tp1=profit,
+                    r_achieved=r_ach, qty_remaining=actual_qty,
+                    tp2_price=trade.target_tp2,
                 )
                 notify_stop_updated(
                     ticker=trade.ticker, old_stop=old_stop,
@@ -908,12 +933,17 @@ def open_meanrev_trade(
     balance      = account.get("balance", balance) if account else balance
     buying_power = account.get("buying_power", 0) if account else 0
 
+    # ── Dynamic Risk: نسبة المخاطرة بناءً على قوة الإشارة (Score)
+    signal_score = getattr(signal, "score", 0.0)
+    risk_pct     = dynamic_risk_pct(signal_score)
+
     sizing = calculate_position_size(
         balance=balance,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         use_leverage=True,
         buying_power=buying_power,
+        risk_override=risk_pct,
     )
 
     total_qty = sizing["quantity"]
@@ -929,7 +959,7 @@ def open_meanrev_trade(
     print(f"   TP1 ({tp1_qty} سهم) : ${signal.target_tp1:.2f} (1R) — يدوي")
     print(f"   TP2 ({tp2_qty} سهم) : ${signal.target_tp2:.2f} (3R) — Alpaca")
     print(f"   وقف الخسارة   : ${signal.stop_loss:.2f}")
-    print(f"   المخاطرة       : ${sizing['risk_amount']} | رافعة ×{sizing['leverage']}")
+    print(f"   المخاطرة       : ${sizing['risk_amount']} ({risk_pct*100:.0f}% | Score={signal_score:.0f}) | رافعة ×{sizing['leverage']}")
 
     # ── براكيت واحد للكامل (TP2 + SL) — TP1 يُكتشف تلقائياً
     order_id = place_bracket_order(
@@ -1036,13 +1066,11 @@ def monitor_trade(trade: OpenTrade) -> dict:
                 return {"status": "trail_updated", "price": current_price,
                         "r": r_current, "new_stop": new_stop, "exit_qty": 0}
         elif trade.side == "short":
-            # SHORT: الوقف يتحرك للأسفل مع انخفاض السعر
-            new_stop = trade.stop_loss - trade.trail_step
-            if current_price < trade.stop_loss - trade.trail_step:
-                new_stop = current_price + trade.trail_step
-                if new_stop < trade.stop_loss:
-                    return {"status": "trail_updated", "price": current_price,
-                            "r": r_current, "new_stop": new_stop, "exit_qty": 0}
+            # SHORT: الوقف فوق السعر — يتحرك للأسفل مع انخفاض السعر (أضيق = أفضل)
+            new_stop = round(current_price + trade.trail_step, 4)
+            if new_stop < trade.stop_loss:
+                return {"status": "trail_updated", "price": current_price,
+                        "r": r_current, "new_stop": new_stop, "exit_qty": 0}
 
     return {"status": "open", "price": current_price,
             "r": r_current, "new_stop": trade.stop_loss, "exit_qty": 0}
