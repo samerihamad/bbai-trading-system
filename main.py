@@ -315,6 +315,13 @@ def monitor_open_trades():
                 trades_to_remove.append(trade)
 
             elif status == "tp1_hit":
+                # ── حارس دفاعي: إذا sync_trade_state_with_alpaca سبق واكتشف TP1
+                # فلن يصل هنا عادةً (monitor_trade يتحقق not trade.tp1_hit)
+                # لكن هذا حارس إضافي لتجنب أي تكرار
+                if trade.tp1_hit:
+                    log(f"  ℹ️  {trade.ticker}: TP1 سبق اكتشافه بواسطة sync — تخطي")
+                    continue
+
                 tp1_qty  = result.get("exit_qty", trade.quantity // 2)
                 new_stop = result["new_stop"]
                 log(f"TP1 HIT: {trade.ticker} [{side.upper()}] @ ${price:.2f} | R={r:.1f} | qty={tp1_qty}")
