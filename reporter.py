@@ -184,13 +184,10 @@ DAILY_SUMMARY_HEADERS = [
 def _save_daily_summary_sheets(stats: dict, balance: float, today: str) -> None:
     """يحفظ ملخص اليوم في تبويب Daily Summary في Google Sheets."""
     try:
-        from executor import _get_sheets_client
-        import os
-        gc = _get_sheets_client()
-        if not gc:
+        from executor import _get_spreadsheet
+        ss = _get_spreadsheet()
+        if not ss:
             return
-        SHEET_ID = "1C1kcOrXAbZ36_0lgC5awNgd1wqpIs3diZO-FXcGXJLo"
-        ss = gc.open_by_key(SHEET_ID)
 
         # إنشاء التبويب إذا لم يكن موجوداً
         try:
