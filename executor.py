@@ -27,8 +27,28 @@ OPEN_TRADES_SHEET  = "Open Trades"
 CLOSED_TRADES_SHEET = "Closed Trades"
 CREDENTIALS_ENV   = "GOOGLE_CREDENTIALS_JSON"
 
+# ─── Sheets Cache — يتجنب إعادة إنشاء OAuth + client في كل استدعاء
+_sheets_cache = {
+    "gc": None,            # gspread client
+    "ss": None,            # spreadsheet object
+    "open_ws": None,       # Open Trades worksheet
+    "closed_ws": None,     # Closed Trades worksheet
+    "created_at": 0.0,     # وقت آخر إنشاء (timestamp)
+}
+_SHEETS_CACHE_TTL = 600  # 10 دقائق — بعدها يُعاد الاتصال (OAuth token refresh)
+
 
 def _get_sheets_client():
+    """
+    يُرجع gspread client مع caching.
+    - يُنشئ client جديد فقط إذا: أول مرة، أو مرّ 10 دقائق، أو فشل سابقاً.
+    - يقلّل Google API calls من ~4 لكل عملية إلى 0 (من الـ cache).
+    """
+    now = time.time()
+    if (_sheets_cache["gc"] is not None
+            and now - _sheets_cache["created_at"] < _SHEETS_CACHE_TTL):
+        return _sheets_cache["gc"]
+
     try:
         import gspread, json as _j
         from google.oauth2.service_account import Credentials
@@ -41,20 +61,54 @@ def _get_sheets_client():
             creds = Credentials.from_service_account_info(_j.loads(creds_json), scopes=scopes)
         else:
             creds = Credentials.from_service_account_file("bbai-489218-bca75c7e5d12.json", scopes=scopes)
-        return gspread.authorize(creds)
+        gc = gspread.authorize(creds)
+        _sheets_cache["gc"] = gc
+        _sheets_cache["ss"] = None        # إعادة ضبط الـ spreadsheet والـ worksheets
+        _sheets_cache["open_ws"] = None
+        _sheets_cache["closed_ws"] = None
+        _sheets_cache["created_at"] = now
+        return gc
     except Exception as e:
         print(f"⚠️  Google Sheets غير متاح: {e}")
+        _sheets_cache["gc"] = None
         return None
 
 
-def _get_open_trades_ws():
+def _invalidate_sheets_cache():
+    """يُبطل الـ cache — يُستدعى عند أي خطأ في الاتصال لإعادة المحاولة."""
+    _sheets_cache["gc"] = None
+    _sheets_cache["ss"] = None
+    _sheets_cache["open_ws"] = None
+    _sheets_cache["closed_ws"] = None
+    _sheets_cache["created_at"] = 0.0
+
+
+def _get_spreadsheet():
+    """يُرجع spreadsheet object مع caching."""
+    if _sheets_cache["ss"] is not None:
+        return _sheets_cache["ss"]
     gc = _get_sheets_client()
     if not gc:
         return None
     try:
         ss = gc.open_by_key(SHEET_ID)
+        _sheets_cache["ss"] = ss
+        return ss
+    except Exception as e:
+        print(f"⚠️  فشل فتح Spreadsheet: {e}")
+        _invalidate_sheets_cache()
+        return None
+
+
+def _get_open_trades_ws():
+    if _sheets_cache["open_ws"] is not None:
+        return _sheets_cache["open_ws"]
+    ss = _get_spreadsheet()
+    if not ss:
+        return None
+    try:
         try:
-            return ss.worksheet(OPEN_TRADES_SHEET)
+            ws = ss.worksheet(OPEN_TRADES_SHEET)
         except Exception:
             headers = [
                 "ticker","strategy","side","order_id",
@@ -65,9 +119,11 @@ def _get_open_trades_ws():
             ]
             ws = ss.add_worksheet(title=OPEN_TRADES_SHEET, rows=100, cols=len(headers))
             ws.append_row(headers)
-            return ws
+        _sheets_cache["open_ws"] = ws
+        return ws
     except Exception as e:
         print(f"⚠️  فشل جلب Open Trades worksheet: {e}")
+        _invalidate_sheets_cache()
         return None
 
 
@@ -122,6 +178,7 @@ def _save_open_trades(trades: list) -> None:
         print(f"✅ حُفظت {len(unique_trades)} صفقة مفتوحة في Google Sheets (batch)")
     except Exception as e:
         print(f"⚠️  فشل حفظ الصفقات المفتوحة: {e}")
+        _invalidate_sheets_cache()
 
 
 def _update_trade_in_sheets(trade) -> None:
@@ -152,6 +209,7 @@ def _update_trade_in_sheets(trade) -> None:
         print(f"  ✅ Sheets: إضافة {trade.ticker} (صف جديد)")
     except Exception as e:
         print(f"  ⚠️  فشل تحديث {trade.ticker} في Sheets: {e}")
+        _invalidate_sheets_cache()
 
 
 def _delete_open_trades_sheets() -> None:
@@ -164,6 +222,7 @@ def _delete_open_trades_sheets() -> None:
         print("✅ تم مسح Open Trades من Google Sheets")
     except Exception as e:
         print(f"⚠️  فشل مسح Open Trades: {e}")
+        _invalidate_sheets_cache()
 
 
 # ─────────────────────────────────────────
@@ -179,19 +238,22 @@ CLOSED_HEADERS = [
 ]
 
 def _get_closed_trades_ws():
-    gc = _get_sheets_client()
-    if not gc:
+    if _sheets_cache["closed_ws"] is not None:
+        return _sheets_cache["closed_ws"]
+    ss = _get_spreadsheet()
+    if not ss:
         return None
     try:
-        ss = gc.open_by_key(SHEET_ID)
         try:
-            return ss.worksheet(CLOSED_TRADES_SHEET)
+            ws = ss.worksheet(CLOSED_TRADES_SHEET)
         except Exception:
             ws = ss.add_worksheet(title=CLOSED_TRADES_SHEET, rows=1000, cols=len(CLOSED_HEADERS))
             ws.append_row(CLOSED_HEADERS)
-            return ws
+        _sheets_cache["closed_ws"] = ws
+        return ws
     except Exception as e:
         print(f"⚠️  فشل جلب Closed Trades worksheet: {e}")
+        _invalidate_sheets_cache()
         return None
 
 
@@ -224,6 +286,7 @@ def save_closed_trade_sheets(record: dict) -> None:
         print(f"✅ صفقة {record.get('ticker')} حُفظت في Closed Trades Sheets")
     except Exception as e:
         print(f"⚠️  فشل حفظ Closed Trade في Sheets: {e}")
+        _invalidate_sheets_cache()
 
 
 def load_closed_trades_by_date_sheets(target_date: str) -> list[dict]:
@@ -236,6 +299,7 @@ def load_closed_trades_by_date_sheets(target_date: str) -> list[dict]:
         return [r for r in rows if str(r.get("date", "")) == target_date]
     except Exception as e:
         print(f"⚠️  فشل جلب Closed Trades من Sheets: {e}")
+        _invalidate_sheets_cache()
         return []
 
 
@@ -279,6 +343,7 @@ def _load_open_trades_from_sheets() -> list:
         return trades
     except Exception as e:
         print(f"❌ خطأ في قراءة Open Trades: {e}")
+        _invalidate_sheets_cache()
         return []
 
 
